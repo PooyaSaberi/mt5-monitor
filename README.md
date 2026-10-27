@@ -1,6 +1,6 @@
 # MT5 Monitor
 
-Local, read-only monitoring prototype for an Alpari demo account. This milestone provides a one-shot account diagnostic. It does not place trades, poll continuously, run a dashboard, or store data.
+Local, read-only monitoring prototype for an Alpari demo account. It provides a one-shot diagnostic and a continuous terminal monitor. It does not place trades, run a dashboard, or store data.
 
 ## Setup
 
@@ -23,6 +23,8 @@ Copy-Item .env.example .env
 Set `MT5_TERMINAL_PATH` to the full path of the local MT5 executable, commonly `terminal64.exe`. In Windows, find the MetaTrader 5 shortcut, open **Properties**, and copy the executable path from **Target** (without command-line options). You can also use Task Manager's **Open file location** on a running terminal. The path must exist before this diagnostic connects.
 
 In MT5, read the exact numeric login and server from the active account in the **Navigator** or account details. Set `MT5_EXPECTED_LOGIN` and `MT5_EXPECTED_SERVER` to those exact values. Confirm that it is a demo account. The diagnostic never calls `login()` and never switches accounts.
+
+`MT5_REFRESH_INTERVAL` controls the monitor's interval in seconds. It defaults to `1` when omitted and must be a positive finite number no greater than `60`. The monitor retries failures after a delay between 1 and 5 seconds.
 
 ## Run
 
@@ -51,6 +53,22 @@ Open positions: 0
 Errors go to stderr with a nonzero exit code. A disconnected terminal, account mismatch, or non-demo account stops the diagnostic before it reads positions. An empty position list is valid; an MT5 `None` result is an error. No trading history is read in this milestone.
 
 Validation: the diagnostic was manually tested against an Alpari MT5 demo account before, during, and after a manually executed trade.
+
+## Continuous monitor
+
+With the same local `.env` configuration and the intended demo account active, run:
+
+```powershell
+.\.venv\Scripts\python.exe .\continuous_monitor.py
+```
+
+Press **Ctrl+C** to exit. Each sequential cycle shows the connection status, last successful collection time in UTC, account totals, and each open position's ticket, symbol, direction, volume, opening/current prices, floating P/L, stop loss, and take profit. The account login is masked and personal account-name fields are omitted.
+
+The monitor checks the expected login, server, and demo status every cycle before positions and again before accepting a result. A mismatch stops it. Other connection/read failures mark the previous snapshot **STALE/RETRYING** with its age; before any successful read, data is **UNAVAILABLE/RETRYING**. It releases and reinitializes the Python connection after those failures. `initialize()` may launch the configured MT5 terminal if it is closed, so closing MT5 is not a reliable disconnection test. The monitor never closes the desktop terminal.
+
+Account, position, and verification reads are separate MT5 calls, so a successful snapshot is not atomic. Fast market changes can occur between those calls.
+
+Validation: the user confirmed that the continuous monitor works in a manual MT5 demo-account test.
 
 ## Troubleshooting
 

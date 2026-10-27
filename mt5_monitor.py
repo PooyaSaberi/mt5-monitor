@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,11 +12,16 @@ class DiagnosticError(Exception):
     """A safe-to-display diagnostic failure."""
 
 
+class AccountGuardError(DiagnosticError):
+    """The connected account is not the configured demo account."""
+
+
 @dataclass(frozen=True)
 class Config:
     terminal_path: Path
     expected_login: int
     expected_server: str
+    refresh_interval: float = 1.0
 
 
 def load_config(env_file: Path = Path(".env")) -> Config:
@@ -45,7 +51,13 @@ def load_config(env_file: Path = Path(".env")) -> Config:
         raise DiagnosticError("MT5_EXPECTED_LOGIN must be a positive account number.") from exc
     if login <= 0:
         raise DiagnosticError("MT5_EXPECTED_LOGIN must be a positive account number.")
-    return Config(terminal_path, login, values["MT5_EXPECTED_SERVER"])
+    try:
+        interval = float(values.get("MT5_REFRESH_INTERVAL", "1"))
+    except ValueError as exc:
+        raise DiagnosticError("MT5_REFRESH_INTERVAL must be a positive finite number of seconds.") from exc
+    if not math.isfinite(interval) or not 0 < interval <= 60:
+        raise DiagnosticError("MT5_REFRESH_INTERVAL must be greater than 0 and at most 60 seconds.")
+    return Config(terminal_path, login, values["MT5_EXPECTED_SERVER"], interval)
 
 
 def _mt5_error(mt5: object) -> str:
@@ -56,6 +68,17 @@ def _mt5_error(mt5: object) -> str:
 def _masked_login(login: int) -> str:
     digits = str(login)
     return "*" * max(0, len(digits) - 4) + digits[-4:]
+
+
+def checked_account(config: Config, mt5: object) -> object:
+    account = mt5.account_info()
+    if account is None:
+        raise DiagnosticError(f"Could not read account information ({_mt5_error(mt5)}).")
+    if account.login != config.expected_login or account.server != config.expected_server:
+        raise AccountGuardError("Connected account does not match the expected login and server.")
+    if account.trade_mode != mt5.ACCOUNT_TRADE_MODE_DEMO:
+        raise AccountGuardError("Connected account is not a demo account.")
+    return account
 
 
 def diagnose(config: Config, mt5: object) -> str:
@@ -69,13 +92,7 @@ def diagnose(config: Config, mt5: object) -> str:
         if not terminal.connected:
             raise DiagnosticError("The MT5 terminal is not connected to the broker.")
 
-        account = mt5.account_info()
-        if account is None:
-            raise DiagnosticError(f"Could not read account information ({_mt5_error(mt5)}).")
-        if account.login != config.expected_login or account.server != config.expected_server:
-            raise DiagnosticError("Connected account does not match the expected login and server.")
-        if account.trade_mode != mt5.ACCOUNT_TRADE_MODE_DEMO:
-            raise DiagnosticError("Connected account is not a demo account.")
+        account = checked_account(config, mt5)
 
         positions = mt5.positions_get()
         if positions is None:
