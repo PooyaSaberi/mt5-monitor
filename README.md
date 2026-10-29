@@ -1,6 +1,6 @@
 # MT5 Monitor
 
-Local, read-only monitoring prototype for an Alpari demo account. It provides a one-shot diagnostic and a continuous terminal monitor. It does not place trades, run a dashboard, or store data.
+Local, read-only monitoring prototype for an Alpari demo account. It provides a one-shot diagnostic, a continuous terminal monitor, and a persistent account recorder. It does not place trades.
 
 ## Setup
 
@@ -83,3 +83,39 @@ Tests use a fake MT5 adapter and never connect to the terminal:
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
+
+## M1 persistent account recorder
+
+The recorder is independent of the dashboard and reads account totals only. It does not read positions, orders or deals. Use the existing environment to install dependencies:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Restore the safe `.env.example` if needed and copy it to the ignored `.env` file. Set the explicit terminal executable path, expected demo login/server, stable `FUND_ID` and `SOURCE_ID`, and an **absolute** `COLLECTOR_DB_PATH` under a private local data directory. Do not put real values in tracked files. `MT5_REFRESH_INTERVAL` defaults to five seconds for this recorder; the existing CLI monitor retains its one-second default. The database path must be distinct for each source. The recorder rejects an existing database with another source, login, server or currency, and rejects unknown schema versions. Keep database backups before changing identity or schema; never edit identity rows to reuse a database.
+
+```powershell
+.\.venv\Scripts\python.exe .\collector.py check
+.\.venv\Scripts\python.exe .\collector.py record
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\path\to\collector.sqlite3
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\path\to\collector.sqlite3 --format json --output C:\path\to\export.json
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\path\to\collector.sqlite3 --format csv --output C:\path\to\export.csv
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\path\to\collector.sqlite3 --format csv --csv-table status_events --output C:\path\to\status.csv
+```
+
+Use `--config C:\path\to\private.env` with `collector.py` for a different private configuration file. `check` verifies the connection and account without creating the database. `record` runs until Ctrl+C. It holds a Windows lock keyed to the terminal path so a second recorder cannot own the same terminal even with a different database path. The lock is released when the process exits; a crash releases the OS lock automatically. SQLite stores each successful observation and its saved status in one transaction. Later read failures create separate retry status events after a database has been bound. Initial failures before a verified account/currency cannot be durably attributed to a source and appear on stderr/stdout only. Storage errors stop recording and return a nonzero exit code. The inspector never imports or connects to MT5; exported data contains source identity, observation IDs and UTC interval timestamps.
+
+`mt5.initialize(path=...)` can launch the configured terminal if it is closed. It receives no credentials and does not switch accounts. `shutdown()` releases only the Python connection, not the desktop terminal or EA. The collected start/end times describe an observation interval: MT5 account reads are not broker-guaranteed atomic snapshots. Historical equity before the recorder first ran is unavailable.
+
+Windows verification for one demo account:
+
+1. Confirm the configured executable, login, server and demo mode in MT5, then run `check`.
+2. Start `record` and compare balance, equity, profit, credit, margin, free margin, margin level and currency in several observations with MT5 over several minutes.
+3. Try a second `record` command for the same terminal with a different database path and confirm it is rejected.
+4. Stop with Ctrl+C, inspect/export the database, restart and confirm earlier observations remain.
+5. Simulate a broker connectivity loss and recovery; confirm retry status events, no new live observations during disconnection, and resumption after recovery.
+6. Confirm the EA continues running and no trade action is made by the recorder.
+
+GA1 live verification (29 October 2026): The configured terminal was already running, and `collector.py check` verified connectivity, the configured account and server, and demo mode. A roughly two-minute run saved 27 observations over 130.8 seconds. IDs were unique, timestamps were UTC and ordered, and collection spacing ranged from 5.01 to 5.06 seconds (median 5.03). Separate saved-status events were present. A second recorder using the same terminal and a different database path was rejected without interrupting the first. After a clean stop, restart appended three observations while retaining the earlier history; the MT5 process remained running. Offline JSON export succeeded. A recent saved balance, equity, profit and free margin matched the values visible in MT5 at comparison time; the other financial fields were not compared in the UI. This is live evidence for GA1 only, not a claim about other accounts or production.
+
+Automated verification uses a fake MT5 adapter and does not connect to a terminal. The full 31-test suite passed during M1 implementation; focused recorder tests cover binding, restart, invalid schema, failed reads, storage failure, duplicate-process locking, shutdown and export. EA health and live connectivity-loss/recovery remain unverified. Do not disrupt office connectivity for a test without an operator-controlled window, since that could affect the EA and other terminals.
