@@ -86,7 +86,7 @@ Tests use a fake MT5 adapter and never connect to the terminal:
 
 ## M1 persistent account recorder
 
-The recorder is independent of the dashboard and reads account totals only. It does not read positions, orders or deals. Use the existing environment to install dependencies:
+The M1 recorder is independent of the dashboard and initially read account totals only. M2 adds open positions and active orders; it does not read historical deals or orders. Use the existing environment to install dependencies:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -119,3 +119,26 @@ Windows verification for one demo account:
 GA1 live verification (29 October 2026): The configured terminal was already running, and `collector.py check` verified connectivity, the configured account and server, and demo mode. A roughly two-minute run saved 27 observations over 130.8 seconds. IDs were unique, timestamps were UTC and ordered, and collection spacing ranged from 5.01 to 5.06 seconds (median 5.03). Separate saved-status events were present. A second recorder using the same terminal and a different database path was rejected without interrupting the first. After a clean stop, restart appended three observations while retaining the earlier history; the MT5 process remained running. Offline JSON export succeeded. A recent saved balance, equity, profit and free margin matched the values visible in MT5 at comparison time; the other financial fields were not compared in the UI. This is live evidence for GA1 only, not a claim about other accounts or production.
 
 Automated verification uses a fake MT5 adapter and does not connect to a terminal. The full 31-test suite passed during M1 implementation; focused recorder tests cover binding, restart, invalid schema, failed reads, storage failure, duplicate-process locking, shutdown and export. EA health and live connectivity-loss/recovery remain unverified. Do not disrupt office connectivity for a test without an operator-controlled window, since that could affect the EA and other terminals.
+
+## M2 active position and order observations
+
+The recorder now reads the complete open-position and active-order sets on every cycle after the guarded account read. Each dataset has its own read start/end time and outcome. `success` with `item_count=0` means MT5 returned a successful empty set. `failed` means MT5 returned `None`, raised an exception, disconnected, or returned invalid records; it does not mean zero items. An account snapshot can still be saved if either active-set read fails. An identity change rejects the affected batch and stops collection. Account, position, and order reads happen sequentially and are **not atomic**. The complete MT5 named-tuple fields are retained as JSON, including integer identifiers, timestamps, prices, volume, SL/TP, profit/swap where present, magic, reason, comment, and external ID. Ticket keys are stored as decimal text to preserve precision.
+
+Each successful batch is a complete observed set. If an item is absent from a later successful batch, it was no longer observed as active at that time. This does not establish a closure execution, realized P/L, or cancellation reason; those require history reads, which M2 does not perform. Failed batches leave the prior successful history intact and have no implied current set.
+
+Schema version 2 adds cycles, active batches, and active records while retaining M1 account observations, status events, and source binding. **Stop the recorder and back up the SQLite database before running the M2 recorder against an existing v1 database.** The next recorder start migrates v1 to v2 transactionally; unsupported newer versions are rejected. Do not copy an open database file as a backup. Use an SQLite backup tool or stop the recorder before copying its database file. The inspector is offline and does not connect to MT5:
+
+```powershell
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\path\to\collector.sqlite3
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\path\to\collector.sqlite3 --format json --output C:\private\sample.json
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\path\to\collector.sqlite3 --format csv --csv-table active_batches --output C:\private\batches.csv
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\path\to\collector.sqlite3 --format csv --csv-table active_records --output C:\private\records.csv
+```
+
+For a short GA1 live check, first back up the stopped database, then run `collector.py check` and `collector.py record` with the existing private configuration. Observe a few cycles, stop with Ctrl+C, and inspect/export the position and order batches. Compare counts and fields with MT5's Trade tab without placing or changing trades. Empty batches are valid if MT5 shows no active items.
+
+GA1 M2 live verification (29 October 2026): A consistent SQLite backup of the stopped v1 database passed `PRAGMA integrity_check`. The live database migrated to v2, retained all 30 M1 observations and source binding, and passed integrity check. A roughly one-minute run added 15 cycles with 15 populated position batches (two records each) and 15 successful empty order batches; a brief restart appended three more cycles. Visible position counts, tickets, symbols, directions, volumes, and opening prices matched MT5's Trade tab. Saved current prices and floating P/L were within 0.02 of a later display. Offline JSON and CSV exports retained exact ticket strings and explicit empty-batch outcomes. Populated active orders, live read failures, live connectivity loss, and EA health remain unverified.
+
+Automated M2 evidence is separate from the GA1 live check: all 37 tests passed in a bounded run. The recorder tests use fake MT5 adapters and temporary databases to cover populated and empty sets, failed reads, identity changes, v1 migration, retained history, identifier precision, and offline export. The tests do not verify actual terminal behavior.
+
+MT5 field and error semantics: [positions_get](https://www.mql5.com/en/docs/python_metatrader5/mt5positionsget_py), [orders_get](https://www.mql5.com/en/docs/python_metatrader5/mt5ordersget_py).

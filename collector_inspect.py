@@ -22,7 +22,13 @@ def read_database(path):
         source = dict(connection.execute('SELECT * FROM source').fetchone())
         observations = [dict(row) for row in connection.execute('SELECT * FROM observations ORDER BY started_at, observation_id')]
         events = [dict(row) for row in connection.execute('SELECT * FROM status_events ORDER BY started_at, event_id')]
-        return {'schema_version': version, 'source': source, 'observations': observations, 'status_events': events}
+        batches = [dict(row) for row in connection.execute('SELECT * FROM active_batches ORDER BY started_at, batch_id')]
+        records = []
+        for row in connection.execute('SELECT batch_id, ticket, payload_json FROM active_records ORDER BY batch_id, ticket'):
+            records.append({'batch_id': row['batch_id'], 'ticket': row['ticket'],
+                            'fields': json.loads(row['payload_json'])})
+        return {'schema_version': version, 'source': source, 'observations': observations,
+                'status_events': events, 'active_batches': batches, 'active_records': records}
     finally:
         connection.close()
 
@@ -31,24 +37,33 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('database', type=Path)
     parser.add_argument('--format', choices=('summary', 'json', 'csv'), default='summary')
-    parser.add_argument('--csv-table', choices=('observations', 'status_events'), default='observations')
+    parser.add_argument('--csv-table', choices=('observations', 'status_events', 'active_batches', 'active_records'), default='observations')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args(argv)
     try:
         data = read_database(args.database)
         if args.format == 'summary':
-            content = f"Source: {data['source']['source_id']} | observations: {len(data['observations'])} | status events: {len(data['status_events'])}\n"
+            outcomes = {}
+            for batch in data['active_batches']:
+                key = (batch['dataset'], batch['outcome'])
+                outcomes[key] = outcomes.get(key, 0) + 1
+            content = (f"Source: {data['source']['source_id']} | observations: {len(data['observations'])} | "
+                       f"status events: {len(data['status_events'])} | batch outcomes: {outcomes}\n")
         elif args.format == 'json':
             content = json.dumps(data, indent=2) + '\n'
         else:
             import io
             buffer = io.StringIO()
             rows = data[args.csv_table]
-            fields = ['fund_id', 'source_id', 'login', 'server', 'currency'] + (
-                ['observation_id', 'started_at', 'ended_at', 'balance', 'equity', 'profit',
-                 'credit', 'margin', 'margin_free', 'margin_level']
-                if args.csv_table == 'observations' else
-                ['event_id', 'started_at', 'ended_at', 'status', 'detail'])
+            if args.csv_table == 'active_records':
+                by_id = {batch['batch_id']: batch for batch in data['active_batches']}
+                rows = [{**by_id[row['batch_id']], **row['fields'],
+                         'batch_id': row['batch_id'], 'ticket': row['ticket']} for row in rows]
+            fields = list(dict.fromkeys(
+                ['fund_id', 'source_id', 'login', 'server', 'currency'] +
+                [key for row in rows for key in row.keys()] +
+                (['batch_id', 'cycle_id', 'dataset', 'outcome', 'item_count', 'started_at', 'ended_at']
+                 if args.csv_table in ('active_batches', 'active_records') else [])))
             writer = csv.DictWriter(buffer, fieldnames=fields)
             writer.writeheader()
             for row in rows:

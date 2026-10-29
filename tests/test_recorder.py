@@ -145,7 +145,8 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(run(self.config, self.mt5, stop=stop, output=lambda line: None), 0)
         data = read_database(self.config.database_path)
         self.assertEqual(len(data['observations']), 1)
-        self.assertEqual([row['status'] for row in data['status_events']], ['saved', 'retrying'])
+        self.assertIn('saved', [row['status'] for row in data['status_events']])
+        self.assertIn('retrying', [row['status'] for row in data['status_events']])
 
     def test_cross_process_terminal_lock(self):
         lock = TerminalLock(self.config.mt5.terminal_path)

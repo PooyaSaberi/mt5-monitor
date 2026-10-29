@@ -5,7 +5,7 @@ import sys
 import threading
 from pathlib import Path
 
-from account_reader import read_account, utc_now
+from account_reader import read_account, read_active_set, utc_now
 from collector_storage import Storage, StorageError
 from mt5_monitor import AccountGuardError, DiagnosticError
 from recorder_config import load_recorder_config
@@ -21,6 +21,7 @@ def run(config, mt5, *, check_only=False, stop=None, output=print):
     try:
         while not stop.is_set():
             started = utc_now()
+            identity_failure = None
             try:
                 if not initialized:
                     if not mt5.initialize(path=str(config.mt5.terminal_path)):
@@ -34,12 +35,36 @@ def run(config, mt5, *, check_only=False, stop=None, output=print):
                             config.mt5.expected_server, observation.currency)
                 if storage is None:
                     storage = Storage(config.database_path, identity)
-                saved_id = storage.save_observation(observation)
-                output(f'Saved observation {saved_id} at {observation.ended_at}')
+                batches = []
+                for dataset in ('positions', 'orders'):
+                    dataset_started = utc_now()
+                    try:
+                        active = read_active_set(config.mt5, mt5, dataset)
+                        batches.append(dict(dataset=dataset, started_at=active.started_at,
+                                            ended_at=active.ended_at, outcome='success',
+                                            records=active.records))
+                    except AccountGuardError as exc:
+                        batches.append(dict(dataset=dataset, started_at=dataset_started,
+                                            ended_at=utc_now(), outcome='identity_mismatch',
+                                            records=(), detail=str(exc)))
+                        identity_failure = exc
+                        break
+                    except DiagnosticError as exc:
+                        batches.append(dict(dataset=dataset, started_at=dataset_started,
+                                            ended_at=utc_now(), outcome='failed',
+                                            records=(), detail=str(exc)))
+                    except Exception:
+                        batches.append(dict(dataset=dataset, started_at=dataset_started,
+                                            ended_at=utc_now(), outcome='failed',
+                                            records=(), detail=f'{dataset} read raised an exception'))
+                cycle_id = storage.save_cycle(observation, started, utc_now(), batches)
+                output(f'Saved cycle {cycle_id} at {observation.ended_at}')
+                if identity_failure:
+                    raise identity_failure
                 failures = 0
                 stop.wait(config.mt5.refresh_interval)
             except AccountGuardError as exc:
-                if storage is not None:
+                if storage is not None and not identity_failure:
                     storage.save_status(started, utc_now(), 'stopped_identity_mismatch', str(exc))
                 raise
             except Exception as exc:
