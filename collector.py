@@ -60,6 +60,8 @@ def run(config, mt5, *, check_only=False, stop=None, output=print,
                         from history_sync import HistorySync
                         history = HistorySync(storage, config, reconcile=reconcile,
                                               resume=resume_history, output=output)
+                if observation.currency != storage.identity[4]:
+                    raise AccountGuardError('Account currency differs from the bound source.')
                 batches = []
                 for dataset in ('positions', 'orders'):
                     dataset_started = utc_now()

@@ -2,10 +2,11 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from collections import namedtuple
 from pathlib import Path
 
-from account_reader import read_active_set
+from account_reader import read_active_set, read_account
 from collector import run
 from collector_inspect import main as inspect_main, read_database
 from collector_storage import Storage, StorageError
@@ -139,6 +140,45 @@ class ActiveSetTests(unittest.TestCase):
         self.assertEqual([b['outcome'] for b in data['active_batches']], ['identity_mismatch'])
         self.assertEqual(data['active_records'], [])
         self.assertFalse(any(b['dataset'] == 'orders' for b in data['active_batches']))
+
+    def test_currency_change_between_collector_cycles_stops_before_active_reads(self):
+        self.mt5.positions = (position(),)
+        stop = StopAfter(3, lambda count: setattr(self.mt5.account, 'currency', 'EUR') if count == 2 else None)
+        with self.assertRaisesRegex(AccountGuardError, 'currency differs'):
+            run(self.config, self.mt5, stop=stop, output=lambda _: None)
+        data = self.inspect()
+        self.assertEqual(data['source']['currency'], 'USD')
+        self.assertEqual(len(data['observations']), 2)
+        self.assertEqual(len(data['active_batches']), 4)
+        self.assertEqual(len(data['active_records']), 2)
+        self.assertEqual([s['status'] for s in data['status_events']].count('stopped_identity_mismatch'), 1)
+        self.assertNotIn('retrying', [s['status'] for s in data['status_events']])
+        db = sqlite3.connect(self.config.database_path)
+        try:
+            self.assertEqual(db.execute('select count(*) from delivery_events').fetchone()[0], 5)
+        finally:
+            db.close()
+        self.assertIn(('shutdown', None), self.mt5.calls)
+
+    def test_storage_currency_guard_preserves_all_cycle_and_delivery_data(self):
+        account = read_account(self.config.mt5, self.mt5)
+        batch = dict(dataset='positions', started_at=account.started_at, ended_at=account.ended_at,
+                     outcome='success', records=(position()._asdict(),))
+        store = Storage(self.config.database_path, self.identity)
+        self.addCleanup(store.close)
+        store.save_cycle(account, account.started_at, account.ended_at, [batch])
+        db = store.connection
+        tables = ('source', 'cycles', 'observations', 'status_events', 'active_batches',
+                  'active_records', 'delivery_stream', 'delivery_events', 'sqlite_sequence')
+        before = {table: db.execute('select * from ' + table).fetchall() for table in tables}
+        with self.assertRaisesRegex(StorageError, 'currency differs'):
+            store.save_cycle(replace(account, currency='EUR', balance=9999), account.started_at, account.ended_at, [batch])
+        self.assertEqual(before, {table: db.execute('select * from ' + table).fetchall() for table in tables})
+        self.assertEqual(db.execute('pragma user_version').fetchone()[0], 4)
+        store.save_cycle(account, account.started_at, account.ended_at, [batch])
+        self.assertEqual(db.execute('select count(*) from observations').fetchone()[0], 2)
+        self.assertEqual(db.execute('select count(*) from delivery_events').fetchone()[0], 4)
+        self.assertEqual(db.execute('select * from delivery_stream').fetchall(), before['delivery_stream'])
 
     def test_v1_migration_retains_history_and_rejects_future_version(self):
         db = sqlite3.connect(self.config.database_path)

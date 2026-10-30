@@ -53,7 +53,12 @@ class Storage:
             self.connection.close()
             raise
 
+    def _require_bound_currency(self, account):
+        if account.currency != self.identity[4]:
+            raise StorageError('Account currency differs from the bound source')
+
     def save_observation(self, observation):
+        self._require_bound_currency(observation)
         observation_id = str(uuid4())
         with self.connection:
             self.connection.execute('INSERT INTO observations (observation_id,started_at,ended_at,balance,equity,profit,credit,margin,margin_free,margin_level) VALUES (?,?,?,?,?,?,?,?,?,?)',
@@ -71,6 +76,7 @@ class Storage:
                 (str(uuid4()), started_at, ended_at, status, detail))
 
     def save_cycle(self, account, cycle_started, cycle_ended, batches):
+        self._require_bound_currency(account)
         cycle_id = str(uuid4())
         observation_id = str(uuid4())
         with self.connection:

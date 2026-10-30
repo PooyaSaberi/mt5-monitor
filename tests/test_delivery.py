@@ -22,7 +22,7 @@ IDENTITY = ('example-fund', 'example-source', 12345678, 'Demo-Server', 'USD')
 
 
 def account():
-    return SimpleNamespace(started_at=START, ended_at=END, balance=1000., equity=1001.,
+    return SimpleNamespace(started_at=START, ended_at=END, currency='USD', balance=1000., equity=1001.,
                            profit=1., credit=0., margin=10., margin_free=991., margin_level=10010.)
 
 

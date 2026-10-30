@@ -81,6 +81,27 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(inspect_main([str(self.config.database_path), '--format', 'csv', '--output', str(output)]), 0)
         self.assertIn('observation_id', output.read_text())
 
+    def test_legacy_observation_currency_guard_preserves_delivery_state(self):
+        observation = read_account(self.config.mt5, self.mt5)
+        store = Storage(self.config.database_path, self.identity)
+        self.addCleanup(store.close)
+        store.save_observation(observation)
+        tables = ('source', 'observations', 'status_events', 'delivery_stream',
+                  'delivery_events', 'sqlite_sequence')
+        before = {table: store.connection.execute('SELECT * FROM ' + table).fetchall()
+                  for table in tables}
+        from dataclasses import replace
+        with self.assertRaisesRegex(StorageError, 'currency differs'):
+            store.save_observation(replace(observation, currency='EUR', balance=9999))
+        self.assertEqual(before, {table: store.connection.execute('SELECT * FROM ' + table).fetchall()
+                                  for table in tables})
+        store.save_observation(observation)
+        self.assertEqual(store.connection.execute('SELECT count(*) FROM observations').fetchone()[0], 2)
+        self.assertEqual(store.connection.execute('SELECT count(*) FROM status_events').fetchone()[0], 2)
+        self.assertEqual(store.connection.execute('SELECT count(*) FROM delivery_events').fetchone()[0], 4)
+        self.assertEqual(store.connection.execute('SELECT * FROM source').fetchall(), before['source'])
+        self.assertEqual(store.connection.execute('SELECT * FROM delivery_stream').fetchall(), before['delivery_stream'])
+
     def test_unsupported_version(self):
         import sqlite3
         db = sqlite3.connect(self.config.database_path)
@@ -97,6 +118,20 @@ class RecorderTests(unittest.TestCase):
         self.mt5.on_read = lambda count: setattr(self.mt5.account, 'server', 'Other') if count == 2 else None
         with self.assertRaises(AccountGuardError):
             read_account(self.config.mt5, self.mt5)
+
+    def test_account_guards_and_currency_change_within_read(self):
+        for field, value in (('login', 1), ('server', 'other'), ('trade_mode', 1)):
+            with self.subTest(field=field):
+                mt5 = FakeMT5()
+                setattr(mt5.account, field, value)
+                with self.assertRaises(AccountGuardError):
+                    read_account(self.config.mt5, mt5)
+        mt5 = FakeMT5()
+        calls = iter((SimpleNamespace(**vars(mt5.account)),
+                      SimpleNamespace(**{**vars(mt5.account), 'currency': 'EUR'})))
+        mt5.account_info = lambda: next(calls)
+        with self.assertRaisesRegex(AccountGuardError, 'currency changed'):
+            read_account(self.config.mt5, mt5)
 
     def test_storage_failure_and_shutdown(self):
         with patch('collector.Storage', side_effect=OSError('disk failure')):
