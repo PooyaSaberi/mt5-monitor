@@ -6,12 +6,20 @@ from pathlib import Path
 from uuid import uuid4
 
 from mt5_monitor import DiagnosticError
+from upload_contract import interval
 
 SCHEMA_VERSION = 4
 
 
 class StorageError(DiagnosticError):
     pass
+
+
+def require_collection_interval(started_at, ended_at):
+    try:
+        interval({'started_at_utc': started_at, 'ended_at_utc': ended_at})
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise StorageError('Invalid collection timestamp interval') from exc
 
 
 class Storage:
@@ -59,6 +67,7 @@ class Storage:
 
     def save_observation(self, observation):
         self._require_bound_currency(observation)
+        require_collection_interval(observation.started_at, observation.ended_at)
         observation_id = str(uuid4())
         with self.connection:
             self.connection.execute('INSERT INTO observations (observation_id,started_at,ended_at,balance,equity,profit,credit,margin,margin_free,margin_level) VALUES (?,?,?,?,?,?,?,?,?,?)',
@@ -77,6 +86,10 @@ class Storage:
 
     def save_cycle(self, account, cycle_started, cycle_ended, batches):
         self._require_bound_currency(account)
+        require_collection_interval(account.started_at, account.ended_at)
+        require_collection_interval(cycle_started, cycle_ended)
+        for batch in batches:
+            require_collection_interval(batch['started_at'], batch['ended_at'])
         cycle_id = str(uuid4())
         observation_id = str(uuid4())
         with self.connection:

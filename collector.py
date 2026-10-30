@@ -8,7 +8,7 @@ from pathlib import Path
 from contextlib import ExitStack
 
 from account_reader import read_account, read_active_set, utc_now
-from collector_storage import Storage, StorageError
+from collector_storage import Storage, StorageError, require_collection_interval
 from mt5_monitor import AccountGuardError, DiagnosticError
 from recorder_config import load_recorder_config
 from terminal_lock import TerminalLock, DatabaseLock, DataDirectoryLock, canonical_path
@@ -49,6 +49,7 @@ def run(config, mt5, *, check_only=False, stop=None, output=print,
                     if not actual_data_path or canonical_path(actual_data_path) != canonical_path(config.data_path):
                         raise AccountGuardError('Connected MT5 data directory differs from MT5_DATA_PATH')
                 observation = read_account(config.mt5, mt5)
+                require_collection_interval(observation.started_at, observation.ended_at)
                 if check_only:
                     output('Connection and demo account verified; currency: ' + observation.currency)
                     return 0

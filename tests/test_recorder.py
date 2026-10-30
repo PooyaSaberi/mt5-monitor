@@ -102,6 +102,25 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(store.connection.execute('SELECT * FROM source').fetchall(), before['source'])
         self.assertEqual(store.connection.execute('SELECT * FROM delivery_stream').fetchall(), before['delivery_stream'])
 
+    def test_legacy_observation_rejects_reversed_interval(self):
+        from dataclasses import replace
+        from upload_reader import read_delivery
+        observation = read_account(self.config.mt5, self.mt5)
+        store = Storage(self.config.database_path, self.identity)
+        self.addCleanup(store.close)
+        store.save_observation(observation)
+        tables = ('source', 'observations', 'status_events', 'delivery_stream',
+                  'delivery_events', 'sqlite_sequence')
+        before = {table: store.connection.execute('SELECT * FROM ' + table).fetchall()
+                  for table in tables}
+        with self.assertRaisesRegex(StorageError, 'timestamp interval'):
+            store.save_observation(replace(observation,
+                started_at='2026-01-01T00:00:10+00:00', ended_at='2026-01-01T00:00:05+00:00'))
+        self.assertEqual(before, {table: store.connection.execute('SELECT * FROM ' + table).fetchall()
+                                  for table in tables})
+        store.save_observation(observation)
+        self.assertEqual(len(read_delivery(self.config.database_path)['events']), 4)
+
     def test_unsupported_version(self):
         import sqlite3
         db = sqlite3.connect(self.config.database_path)
