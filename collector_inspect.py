@@ -51,7 +51,8 @@ def read_history(path, table, start=None, end=None, limit=1000, mapping=None, re
     db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
     db.row_factory = sqlite3.Row
     try:
-        if db.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION:
+        version = db.execute('PRAGMA user_version').fetchone()[0]
+        if version not in (3, SCHEMA_VERSION):
             raise ValueError('Unsupported database schema version')
         source = dict(db.execute('SELECT * FROM source').fetchone())
         sql, clauses, params = f'SELECT t.* FROM {table} t', [], []
@@ -106,7 +107,7 @@ def read_history(path, table, start=None, end=None, limit=1000, mapping=None, re
                     row['report_day_membership'] = 'verified'
                     accepted.append(row)
             rows = accepted
-        return safe_export({'schema_version': SCHEMA_VERSION, 'source': source,
+        return safe_export({'schema_version': version, 'source': source,
                             'report_timezone': REPORT_ZONE, 'event_time_basis': mapping.event_basis,
                             'time_filter_basis': 'Tehran_civil_day' if report_date else 'raw_epoch_literal',
                             'report_day': report_date,
@@ -148,7 +149,7 @@ def read_database(path, mapping=None):
     connection.row_factory = sqlite3.Row
     try:
         version = connection.execute('PRAGMA user_version').fetchone()[0]
-        if version != SCHEMA_VERSION:
+        if version not in (3, SCHEMA_VERSION):
             raise ValueError(f'Unsupported database schema version {version}')
         source = dict(connection.execute('SELECT * FROM source').fetchone())
         observations = [dict(row) for row in connection.execute('SELECT * FROM observations ORDER BY started_at, observation_id')]

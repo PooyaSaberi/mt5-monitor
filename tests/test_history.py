@@ -369,6 +369,10 @@ class MigrationTests(unittest.TestCase):
             account = read_account(__import__('mt5_monitor').Config(Path('terminal.exe'), 12345678, 'Demo-Server'), SetMT5())
             store.save_cycle(account, account.started_at, account.ended_at, [dict(dataset='positions', started_at=account.started_at, ended_at=account.ended_at, outcome='success', records=())])
             db = store.connection
+            for table in ('observations', 'status_events'):
+                db.execute('DROP TRIGGER delivery_' + table)
+            db.execute('DROP TABLE delivery_events')
+            db.execute('DROP TABLE delivery_stream')
             for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'history_%' OR name IN ('deals','deal_revisions'))").fetchall():
                 db.execute(f'DROP TABLE {table}')
             db.execute('PRAGMA user_version=2')
@@ -386,7 +390,7 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT name FROM sqlite_master WHERE name='history_partial'").fetchall(), [])
             db.close()
             upgraded = Storage(path, identity)
-            self.assertEqual(upgraded.connection.execute('PRAGMA user_version').fetchone()[0], 3)
+            self.assertEqual(upgraded.connection.execute('PRAGMA user_version').fetchone()[0], 4)
             for table, rows in before.items():
                 self.assertEqual(upgraded.connection.execute(f'SELECT * FROM {table}').fetchall(), rows)
             upgraded.close()

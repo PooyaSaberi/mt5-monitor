@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from mt5_monitor import DiagnosticError
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class StorageError(DiagnosticError):
@@ -22,7 +22,7 @@ class Storage:
             self.connection.execute('PRAGMA busy_timeout=5000')
             self.connection.execute('BEGIN IMMEDIATE')
             version = self.connection.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, 1, 2, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, SCHEMA_VERSION):
                 raise StorageError(f'Unsupported database schema version {version}; expected {SCHEMA_VERSION}')
             if version == 0:
                 if self.connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table'").fetchone()[0]:
@@ -42,7 +42,10 @@ class Storage:
             if version < 3:
                 from history_storage import create_schema
                 create_schema(self.connection)
-                self.connection.execute('PRAGMA user_version=3')
+            if version < 4:
+                from delivery_stream import create_schema
+                create_schema(self.connection)
+                self.connection.execute('PRAGMA user_version=4')
             self.connection.commit()
             self.identity = identity
         except Exception:

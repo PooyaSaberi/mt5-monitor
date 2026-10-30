@@ -1,5 +1,18 @@
 # MT5 Monitor
 
+## M5.1: durable local delivery preparation
+
+Schema v4 adds a transactional delivery stream for account observations and
+sanitized collection statuses, including each observation's complete recorded
+position/order batches. The offline allowlisted contract distinguishes empty,
+failed and absent datasets, preserves exact identifier strings, and labels raw
+broker event times unverified. No networking, uploader runner or receiver exists
+yet. See [contract, examples, migration and recovery requirements](docs/upload-contract.md).
+Before a later recorder start against an operational database, stop recording,
+take and verify a consistent backup: the next start upgrades to v4 even with
+history disabled. Operational databases were not migrated during M5.1 coding.
+History remains disabled and event-time mapping remains unverified.
+
 ## M4: prepare independent sources
 
 Use one selected private configuration, one process, one explicit terminal installation/data directory and one SQLite file per source. `--config` reads only that file; inherited environment variables do not override it. Duplicate keys and `UNRESOLVED...` placeholders fail validation. Keep private files outside the checkout; `*.env` is also ignored. Preserve established fund/source identifiers and database paths after recording begins.

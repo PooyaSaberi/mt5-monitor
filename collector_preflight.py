@@ -45,7 +45,7 @@ def check_configuration_set(paths):
                     expected = (config.fund_id, config.source_id, config.mt5.expected_login, config.mt5.expected_server)
                     if len(rows) != 1 or rows[0][:4] != expected or not rows[0][4]:
                         errors.append(f'{label}: existing database source/account/server binding differs')
-                    if version not in (1, 2, SCHEMA_VERSION):
+                    if version not in (1, 2, 3, SCHEMA_VERSION):
                         errors.append(f'{label}: unsupported database schema version')
                     elif version < SCHEMA_VERSION:
                         notes.append(f'{label}: database schema v{version}; stopped backup and approved v{SCHEMA_VERSION} upgrade required before record')
