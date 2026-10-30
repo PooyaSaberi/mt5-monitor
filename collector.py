@@ -5,12 +5,13 @@ import sys
 import threading
 import time
 from pathlib import Path
+from contextlib import ExitStack
 
 from account_reader import read_account, read_active_set, utc_now
 from collector_storage import Storage, StorageError
 from mt5_monitor import AccountGuardError, DiagnosticError
 from recorder_config import load_recorder_config
-from terminal_lock import TerminalLock
+from terminal_lock import TerminalLock, DatabaseLock, DataDirectoryLock, canonical_path
 from report_time import aware_utc, tehran
 
 
@@ -18,11 +19,19 @@ def run(config, mt5, *, check_only=False, stop=None, output=print,
         reconcile=None, resume_history=False, monotonic=time.monotonic):
     stop = stop or threading.Event()
     lock = TerminalLock(config.mt5.terminal_path)
+    ownership = ExitStack()
+    ownership.callback(lock.close)
     storage = None
     initialized = False
     failures = 0
     history = None
     try:
+        if not check_only:
+            database_lock = DatabaseLock(config.database_path)
+            ownership.callback(database_lock.close)
+        if config.data_path is not None:
+            data_lock = DataDirectoryLock(config.data_path)
+            ownership.callback(data_lock.close)
         while not stop.is_set():
             cycle_began = monotonic()
             started = utc_now()
@@ -32,6 +41,13 @@ def run(config, mt5, *, check_only=False, stop=None, output=print,
                     if not mt5.initialize(path=str(config.mt5.terminal_path)):
                         raise DiagnosticError('MT5 initialization failed')
                     initialized = True
+                if config.data_path is not None:
+                    terminal = mt5.terminal_info()
+                    if terminal is None:
+                        raise DiagnosticError('Could not verify MT5 data directory')
+                    actual_data_path = getattr(terminal, 'data_path', None)
+                    if not actual_data_path or canonical_path(actual_data_path) != canonical_path(config.data_path):
+                        raise AccountGuardError('Connected MT5 data directory differs from MT5_DATA_PATH')
                 observation = read_account(config.mt5, mt5)
                 if check_only:
                     output('Connection and demo account verified; currency: ' + observation.currency)
@@ -96,10 +112,14 @@ def run(config, mt5, *, check_only=False, stop=None, output=print,
                 initialized = False
                 stop.wait(min(2 ** (failures - 1), 30))
     finally:
-        mt5.shutdown()
-        if storage is not None:
-            storage.close()
-        lock.close()
+        try:
+            mt5.shutdown()
+        finally:
+            try:
+                if storage is not None:
+                    storage.close()
+            finally:
+                ownership.close()
     return 0
 
 

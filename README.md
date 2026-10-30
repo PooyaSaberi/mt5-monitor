@@ -1,5 +1,37 @@
 # MT5 Monitor
 
+## M4: prepare independent sources
+
+Use one selected private configuration, one process, one explicit terminal installation/data directory and one SQLite file per source. `--config` reads only that file; inherited environment variables do not override it. Duplicate keys and `UNRESOLVED...` placeholders fail validation. Keep private files outside the checkout; `*.env` is also ignored. Preserve established fund/source identifiers and database paths after recording begins.
+
+Add `MT5_DATA_PATH` using **File > Open Data Folder** in each intended terminal. The runner checks the connected terminal's actual data directory before account reads. This setting is optional for older configurations but required by the M4 offline set preflight. Keep `HISTORY_ENABLED=false`; do not activate an unverified timestamp mapping.
+
+With collectors stopped, validate the complete set without importing MT5, connecting, creating databases or migrating them:
+
+```powershell
+.\.venv\Scripts\python.exe .\collector_preflight.py --config C:\private\mt5-configs\ga1.env --config C:\private\mt5-configs\ga2.env --config C:\private\mt5-configs\ga3.env
+```
+
+Preflight rejects duplicate terminal paths, data directories, database paths, fund/source identifiers and expected account/server pairs. Existing database identity must match. A schema-upgrade note is a prerequisite to recording: stop the recorder, create and verify a SQLite backup as described below, and obtain approval before an existing database is upgraded. Preflight does not approve or perform that upgrade. New paths are reserved only; files are created later by recording. Re-run preflight after editing any configuration.
+
+After operator confirmation of account assignments, distinct running terminals/data folders, a passing set preflight and any required backup/upgrade approval, open three visible PowerShell consoles. In each console select its source and run the following independently (use `ga2.env` and `ga3.env` in the other consoles):
+
+```powershell
+Set-Location C:\path\to\mt5-monitor
+.\.venv\Scripts\python.exe .\collector.py check --config C:\private\mt5-configs\ga1.env
+.\.venv\Scripts\python.exe .\collector.py record --config C:\private\mt5-configs\ga1.env
+```
+
+Run `record` only after that source's check passes. Confirm terminals are already open first: MT5 `initialize(path=...)` may automatically launch a closed terminal. Stop each recorder with Ctrl+C in its own console. No services, scheduled tasks or automatic startup are installed. Do not run the old dashboard, continuous monitor or another MT5 client as an additional connection owner alongside these collectors.
+
+Cooperating recorder processes hold executable, configured data-directory and database locks before connecting. The terminal lock retains compatibility with earlier recorder versions. Database binding additionally rejects a different source/account/server/currency. Locks are local to the same Windows user's temporary lock directory; they do not coordinate other Windows users, older clients lacking these guards, or unrelated MT5 programs. Use the same Windows user and code version for all three sources. Set-level duplicate identifier validation requires running preflight; it is not a global identifier registry. A failure stops/retries only its own process. Offline tests cover these protections; the scoped three-terminal live evidence is recorded below.
+
+For live verification, check all three sources independently, collect briefly in the three consoles, inspect each database offline, verify distinct identities and appended account/position/order records, then stop each process and confirm the other two continue. Do not change accounts or trades to manufacture failures. EA health and broker event-time mapping require separate evidence.
+
+M4 live evidence (30 October 2026): the operator confirmed the GA2/GA3 installation assignments. Separate private configurations passed set preflight and live account/server/demo/connectivity/data-directory checks. A SQLite API backup of stopped GA1 passed integrity/content checks; the same transactional recorder storage migration was invoked offline to upgrade v2 to v3. All 48 pre-existing account observations, 18 cycles, 36 active batches, 36 active records and 48 status events remained unchanged, including after live verification. Source binding and the original .env were preserved. This supersedes the earlier M3 checkpoint statement that the ongoing database had not yet been migrated.
+
+All three sources recorded together for approximately two minutes (24 cycles each). GA2 alone was stopped for 15 seconds: GA1 and GA3 each appended three observations while GA2 remained at 24. GA2 restarted and appended three more. Final new cycle counts were GA1 30, GA2 27 and GA3 30; median cycle intervals were about 5.009, 5.009 and 5.010 seconds. GA2 had an intentional 19.428-second restart gap. Each cycle saved successful position/order batches: GA1 two positions and zero orders; GA2/GA3 empty positions and orders. All databases passed integrity checks, unique observation IDs and ordered UTC intervals were checked, and private offline JSON exports succeeded. All verification processes exited cleanly and locks were released; all three terminals remained running. History stayed disabled with zero history queries; no unverified time mapping was activated. Account totals were not available through accessibility text, so visual financial-value comparisons remain pending. EA health, populated orders and live failure/connectivity behavior remain pending. Backups, configurations, exports and detailed evidence remain outside Git.
+
 Local, read-only monitoring prototype for an Alpari demo account. It provides a one-shot diagnostic, a continuous terminal monitor, and a persistent account recorder. It does not place trades.
 
 ## Setup
