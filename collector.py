@@ -3,6 +3,7 @@
 import argparse
 import sys
 import threading
+import time
 from pathlib import Path
 
 from account_reader import read_account, read_active_set, utc_now
@@ -10,16 +11,20 @@ from collector_storage import Storage, StorageError
 from mt5_monitor import AccountGuardError, DiagnosticError
 from recorder_config import load_recorder_config
 from terminal_lock import TerminalLock
+from report_time import aware_utc, tehran
 
 
-def run(config, mt5, *, check_only=False, stop=None, output=print):
+def run(config, mt5, *, check_only=False, stop=None, output=print,
+        reconcile=None, resume_history=False, monotonic=time.monotonic):
     stop = stop or threading.Event()
     lock = TerminalLock(config.mt5.terminal_path)
     storage = None
     initialized = False
     failures = 0
+    history = None
     try:
         while not stop.is_set():
+            cycle_began = monotonic()
             started = utc_now()
             identity_failure = None
             try:
@@ -35,6 +40,10 @@ def run(config, mt5, *, check_only=False, stop=None, output=print):
                             config.mt5.expected_server, observation.currency)
                 if storage is None:
                     storage = Storage(config.database_path, identity)
+                    if config.history.enabled:
+                        from history_sync import HistorySync
+                        history = HistorySync(storage, config, reconcile=reconcile,
+                                              resume=resume_history, output=output)
                 batches = []
                 for dataset in ('positions', 'orders'):
                     dataset_started = utc_now()
@@ -58,11 +67,17 @@ def run(config, mt5, *, check_only=False, stop=None, output=print):
                                             ended_at=utc_now(), outcome='failed',
                                             records=(), detail=f'{dataset} read raised an exception'))
                 cycle_id = storage.save_cycle(observation, started, utc_now(), batches)
-                output(f'Saved cycle {cycle_id} at {observation.ended_at}')
+                display_time = tehran(aware_utc(observation.ended_at)).isoformat()
+                output(f'Saved cycle {cycle_id} at {display_time} Asia/Tehran (collector UTC {observation.ended_at})')
                 if identity_failure:
                     raise identity_failure
                 failures = 0
-                stop.wait(config.mt5.refresh_interval)
+                if history is not None:
+                    history.tick(mt5)
+                elapsed = monotonic() - cycle_began
+                if elapsed > config.mt5.refresh_interval:
+                    output(f'Live collection interval overrun: {elapsed:.2f}s')
+                stop.wait(max(0, config.mt5.refresh_interval - elapsed))
             except AccountGuardError as exc:
                 if storage is not None and not identity_failure:
                     storage.save_status(started, utc_now(), 'stopped_identity_mismatch', str(exc))
@@ -92,11 +107,26 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('check', 'record'))
     parser.add_argument('--config', type=Path, default=Path(__file__).with_name('.env'))
+    parser.add_argument('--reconcile-from')
+    parser.add_argument('--reconcile-to')
+    parser.add_argument('--resume-history', action='store_true')
     args = parser.parse_args(argv)
     try:
         config = load_recorder_config(args.config)
+        reconcile = None
+        if bool(args.reconcile_from) != bool(args.reconcile_to):
+            raise DiagnosticError('Both reconciliation bounds are required')
+        if args.reconcile_from:
+            from deal_reader import parse_utc
+            from datetime import datetime, timezone
+            reconcile = (parse_utc(args.reconcile_from), parse_utc(args.reconcile_to))
+            if reconcile[0] >= reconcile[1] or reconcile[1] > datetime.now(timezone.utc):
+                raise DiagnosticError('Invalid reconciliation range')
+        if (reconcile or args.resume_history) and (not config.history.enabled or args.command != 'record'):
+            raise DiagnosticError('History options require enabled history and the record command')
         import MetaTrader5 as mt5
-        return run(config, mt5, check_only=args.command == 'check')
+        return run(config, mt5, check_only=args.command == 'check',
+                   reconcile=reconcile, resume_history=args.resume_history)
     except KeyboardInterrupt:
         print('Collector stopped.')
         return 0

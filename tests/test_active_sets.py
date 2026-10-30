@@ -155,7 +155,7 @@ class ActiveSetTests(unittest.TestCase):
         store = Storage(self.config.database_path, self.identity)
         store.close()
         data = self.inspect()
-        self.assertEqual(data['schema_version'], 2)
+        self.assertEqual(data['schema_version'], 3)
         self.assertEqual(data['observations'][0]['observation_id'], 'old-id')
         self.assertIsNone(data['observations'][0]['cycle_id'])
         self.assertEqual(data['status_events'][0]['event_id'], 'old-event')

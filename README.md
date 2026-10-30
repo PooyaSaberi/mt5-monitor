@@ -4,13 +4,13 @@ Local, read-only monitoring prototype for an Alpari demo account. It provides a 
 
 ## Setup
 
-Use Windows with 64-bit Python 3.13 and an existing `.venv`. Install the pinned direct dependency into that environment:
+Use Windows with 64-bit Python 3.13 and an existing `.venv`. Install the pinned recorder dependencies into that environment:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-The installed and verified direct dependency is `MetaTrader5==5.0.6231` (which installs NumPy as a transitive dependency). No broker password is needed.
+The recorder's tested direct dependencies are `MetaTrader5==5.0.6231` and `tzdata==2026.6`. MetaTrader5 installs NumPy as a transitive dependency; tzdata supplies IANA timezone data on Windows. The committed `requirements.txt` installs both recorder dependencies with the command above. No broker password is needed.
 
 ## Local configuration
 
@@ -142,3 +142,94 @@ GA1 M2 live verification (29 October 2026): A consistent SQLite backup of the st
 Automated M2 evidence is separate from the GA1 live check: all 37 tests passed in a bounded run. The recorder tests use fake MT5 adapters and temporary databases to cover populated and empty sets, failed reads, identity changes, v1 migration, retained history, identifier precision, and offline export. The tests do not verify actual terminal behavior.
 
 MT5 field and error semantics: [positions_get](https://www.mql5.com/en/docs/python_metatrader5/mt5positionsget_py), [orders_get](https://www.mql5.com/en/docs/python_metatrader5/mt5ordersget_py).
+
+## M3 historical deal synchronization
+
+Checkpoint status: restartable deal synchronization and explicit `Asia/Tehran` reporting support are implemented, with 74 passing automated tests and the isolated GA1 checks described below. Collector-observation Tehran timestamps are available. GA1 broker deal event conversions remain unverified and null; Tehran event-day reports and executable query plans remain gated on independently verified event/query mappings. **M3 is not operationally verified for Tehran trade-day reports.** The measured PC clock skew (about 44.7 seconds ahead of independent UTC during diagnostics) remains uncorrected, and stored collector UTC values retain their original PC-clock basis.
+
+Operational follow-up: confirm broker/MetaQuotes deal-epoch and query-boundary semantics and historical DST rules; compare exact tickets in Deals view, including commission/swap/fee where available; verify clock synchronization under operator control; then validate a narrowly scoped private mapping and Tehran daily boundaries before enabling ongoing history. Populated active-order verification, induced live failures/connectivity recovery, corrections/omissions, and EA health remain pending live checks. History stays disabled by default, and the disposable verification start is not the ongoing GA1 history-start decision.
+
+History is **disabled by default**. Existing M1/M2 configuration files continue to work and issue no history requests. To opt in, add `HISTORY_ENABLED=true` and an operator-chosen `HISTORY_START_UTC` to the ignored private configuration. The start must be an explicit UTC timestamp at whole-second precision, such as `2026-01-01T00:00:00Z`; this is an example, not GA1's chosen start. A start is required only when enabled. No credentials are needed, and the recorder never logs in, switches accounts, or submits trades. Historical orders and financial performance calculations are outside M3.
+
+Before upgrading, stop the recorder and take a consistent SQLite backup. Schema v3 upgrades v1 or v2 transactionally, retaining account observations, cycles, active batches, status events and source binding. Unknown newer versions are rejected. The next `record` command upgrades the schema even if history is disabled; `check` does not open or migrate the database. On a migration/integrity failure, preserve both the original database and backup for investigation.
+
+The first enabled start binds the configured history start to the database. Changing that start later is rejected without resetting progress. Restore the original start and use an explicit reconciliation range to inspect other dates, including earlier dates. Disabling history pauses it without discarding state; re-enabling with the same start resumes it. Pending reconciliation jobs survive restart. Repeating an unfinished identical reconciliation request resumes that job; repeating a completed range creates a new reconciliation pass.
+
+The existing collector owns every MT5 call sequentially under its terminal lock. After a valid live cycle is saved, it can run one history query in an available slot. Round-robin selection between initial import, recent refresh, and explicit reconciliation prevents starvation. All workloads use bounded date chunks, including recent refresh. Live intervals use the remaining time after work rather than adding a fresh five-second wait. Synchronous MT5 requests can still delay live collection: there is **no hard five-second guarantee**, and overruns are reported.
+
+| Configuration | Default | Meaning |
+|---|---:|---|
+| `HISTORY_ENABLED` | `false` | Opt in to history reads |
+| `HISTORY_START_UTC` | none | Required UTC start when enabled |
+| `HISTORY_CHUNK_SECONDS` | 86400 | Maximum whole API query span |
+| `HISTORY_OVERLAP_SECONDS` | 300 | Re-query prior boundary data; capped at half the effective chunk |
+| `HISTORY_LOOKBACK_SECONDS` | 86400 | Recent-history refresh range |
+| `HISTORY_REFRESH_SECONDS` | 60 | Delay before starting another completed recent sweep |
+| `HISTORY_SLOT_SECONDS` | 30 | Minimum gap between history requests, measured after completion |
+| `HISTORY_RETRY_SECONDS` / `HISTORY_RETRY_MAX_SECONDS` | 30 / 300 | Exponential retry bounds per job |
+| `HISTORY_SAFETY_LAG_SECONDS` | 10 | Keep query endpoints behind the current UTC time |
+| `HISTORY_SLOW_SECONDS` | 1 | Slow-request threshold |
+| `HISTORY_MIN_CHUNK_SECONDS` | 300 | Smallest adaptive chunk |
+| `HISTORY_SLOW_LIMIT` | 3 | Consecutive slow calls at minimum chunk before suspension |
+| `HISTORY_MAX_RECORDS` | 10000 | Reject oversized responses without accepting partial batches |
+
+Initial import advances oldest first. Once caught up, it continues forward from its durable cursor, so a long offline gap is not skipped merely because it exceeds the recent lookback. Recent refresh repeatedly sweeps its captured range in chunks. One query runs per slot without catch-up bursts. Failed jobs back off individually, leaving other workloads eligible. Slow requests halve the effective chunk toward its minimum; repeatedly slow requests at that minimum suspend history. Oversized batches also shrink chunks, and suspend history if even the minimum range is too dense. Progress never advances for those failures. Adaptive chunk size and suspension survive restart; `record --resume-history` explicitly clears suspension. Configuration bounds clamp the retained adaptive chunk when restarting.
+
+Each query checks account/server/demo identity and connectivity before and after the request. A detected identity change rejects the response and stops the recorder. Ordinary history failures retain valid live observations and are recorded in `history_queries`, not as live-read failures. Failed query counts and retry timing are in `history_jobs`; adaptive suspension is in `history_state`. Inspect these separately from live cycle health. Storage failures are fatal and roll back accepted-query work.
+
+Successful empty responses are recorded with `outcome=success` and `item_count=0`, and can advance the cursor. `None`, exceptions, disconnections, malformed or oversized results are failures with no accepted membership and no progress advance. All returned deal fields and unknown operation types are retained, including non-trading balance/credit/charge/commission/correction operations and records with empty symbols or zero volume. Ticket, order, magic and position identifiers are exact decimal strings in storage payloads and exports, including JSON for JavaScript consumers. Broker event seconds/milliseconds remain integers; query collection times are UTC. Broker event time and collector observation time have different meanings.
+
+Current deals are keyed by source and exact ticket. Identical responses do not create duplicate deals or revisions. Changed payloads append immutable revisions and update the current version, retaining the earlier payload and originating query. Query membership records the exact returned ticket/revision set. Successful queries record omission evidence for previously seen deals in the conservative interior of the range; boundary seconds are excluded. Missing records are retained with a missing flag, and later returns append reappearance evidence. Absence never implies deletion, cancellation, or a realized financial result. A success only establishes that a range was queried successfully: it cannot prove broker history is complete, especially before the earliest returned record. Recent refresh cannot detect arbitrary older corrections; explicit reconciliation can detect only changes exposed in the queried ranges, and cannot reconstruct intermediate versions overwritten between reads.
+
+Normal commands remain unchanged. Examples below use illustrative dates only; keep private exports outside Git:
+
+```powershell
+.\.venv\Scripts\python.exe .\collector.py check
+.\.venv\Scripts\python.exe .\collector.py record
+.\.venv\Scripts\python.exe .\collector.py record --reconcile-from 2026-01-01T00:00:00Z --reconcile-to 2026-01-03T00:00:00Z
+.\.venv\Scripts\python.exe .\collector.py record --resume-history
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\private\collector.sqlite3 --history-table history_jobs --format json
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\private\collector.sqlite3 --history-table history_queries --format json --limit 100
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\private\collector.sqlite3 --history-table deals --from-utc 2026-01-01T00:00:00Z --to-utc 2026-01-03T00:00:00Z --limit 1000 --format json --output C:\private\deals.json
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\private\collector.sqlite3 --history-table deal_revisions --format csv --output C:\private\revisions.csv
+```
+
+Offline inspection supports `deals`, `deal_revisions`, `history_queries`, `history_query_members`, `history_jobs`, `history_state`, and `history_discrepancies`. It imports no MT5 extension and opens the database read-only. Limits default to 1000 rows (maximum 100000). Date filters are half-open. Legacy `--from-utc`/`--to-utc` deal/revision filters compare literal epoch numbers; they are not evidence of physical UTC event semantics. Query/job/membership filters use the requested numeric range start; discrepancy filters use collector observation time; state filters use configured history start. Verified Tehran civil-day filtering uses `--report-date` as described below. Membership, coverage, revisions, retry state and omission evidence can all be exported. A row limit may truncate output and is not a completeness claim.
+
+M3 automated verification passed 61 tests in a bounded full-suite run, using fake MT5 responses, controlled clocks and temporary databases. The ongoing GA1 database has not been migrated for M3. For a short GA1 check: stop recording, verify the running intended terminal, create and integrity-check a SQLite backup, choose the history start explicitly, and enable history in private configuration. Run `check`, then record a few slots over a short chosen range. Compare deals with the terminal History tab (tickets, operation types, event times and amounts), including a non-trading operation if available. Restart, repeat/reconcile the same range, and confirm no duplicate deals or unchanged revisions; inspect offline exports and retained M1/M2 history. Do not place trades or change account/network settings to manufacture test data. Live corrections, omissions and absent operation types remain pending until safely observed.
+
+An isolated GA1 live check on 29 October 2026 used a fresh private test database and a disposable seven-day start, with one-second history slots and the normal five-second live interval. It stored 54 deals/revisions, completed the requested initial range, reconciled one day without duplicates or new revisions, and retained history across restarts. Thirty-three live cycles and history queries succeeded. Within-run cycle spacing was 5.0004–5.0155 seconds, and history requests took 0.0036–0.0059 seconds. Offline JSON/CSV counts and exact identifier strings matched storage; hashes confirmed that the original GA1 configuration/database were unchanged. Four visible balance-deal tickets, types, timestamps and amounts matched the History tab, and a closed-position profit matched its linked exit deal. Commission/swap/fee comparisons were not available in the visible columns. UTC event interpretation remains unresolved: the two open positions had raw event timestamps later than the UTC query cutoff and no linked deals in the imported set. The queried range is therefore not a claim of complete recent GA1 activity. Confirm the terminal/broker history timezone and query-boundary mapping before treating this as ongoing UTC-correct synchronization. The disposable start is not GA1's final history-start decision.
+
+Follow-up diagnostics on 30 October located both opening deals using exact position identifiers and a bounded range around their raw event values. UTC-aware datetimes, equivalent UTC+03:30-aware datetimes, and integer epoch arguments returned identical ticket sets. Repeating the old cutoff returned neither deal; widened diagnostic queries returned both, and M3 validation accepted both without discarding a record. Position creation/update timestamps and linked deal timestamps agreed, so identifier linkage, update-time confusion and millisecond conversion do not explain the exclusion. The immediate cause is that the returned event values fall after the old request cutoff. The absolute UTC meaning of those broker/terminal event values remains unconfirmed; no fixed offset was inferred or applied. Windows reported an unsynchronized Local CMOS Clock, although its current UTC was close to an independent UTC reading. The existing History display was Positions, not Deals; an exact-ticket comparison in Deals view and broker clarification of historical timestamp/query semantics remain pending. These diagnostic results were kept separate from synchronization storage; original configuration, databases and cursors were unchanged.
+
+## Reporting timezone and broker event-time verification
+
+Business reports, report dates and display timestamps use **IANA `Asia/Tehran`**, never the Windows local timezone. `tzdata==2026.6` is a pinned project dependency and supplies Windows timezone data to Python `zoneinfo`. Install with the existing venv command above. Recorder configuration checks that `Asia/Tehran` can be loaded before connecting. Collector console timestamps display Tehran time alongside the original collector UTC timestamp. Exports add explicit Tehran/UTC collector-observation fields without changing stored values. The PC's clock accuracy remains distinct from its timezone.
+
+There are three separate time concepts: untouched MT5 broker event values (`time`, `time_msc`, update/setup/done fields), collector observation UTC as recorded by the PC, and derived Tehran report time. Alpari's documented GMT+2 winter/GMT+3 DST server display policy is evidence about its server clock, not proof of Python deal-epoch or query-boundary semantics. No code automatically subtracts a server offset. Raw stored history and existing collector timestamps are never shifted or rewritten.
+
+Broker conversions default to `status=unverified`, with `event_utc=null` and `event_tehran=null`. `raw_epoch_as_utc_candidate` is explicitly a literal numeric interpretation for investigation, not an authoritative event instant. Query/job progress retains its raw numbers and `*_request_argument` ISO representation; physical `*_utc` and `*_tehran` fields remain null unless the query time basis is separately verified. This also prevents a successful numeric query cursor from being presented as proof of all real-world activity through a UTC instant.
+
+The safe `time-mapping.example.json` leaves both bases unverified. An operator may supply a separate private mapping file to the offline inspector only after obtaining evidence. Its fields are `event_basis` and `query_basis` (each `unverified`, `utc`, or `server_wall`), `server_zone` (an evidenced IANA zone for server-wall mappings), `evidence_ref`, `valid_from_utc`, and `valid_to_utc` (exclusive). Verified bases require both an evidence reference and a bounded validity period. Event and query bases are independent: proving one does not prove the other. No mapping file is selected implicitly from Windows settings or inherited environment variables.
+
+For an evidenced UTC epoch, convert directly to UTC and then Tehran, without a broker-offset subtraction. For an evidenced server-wall epoch, resolve the raw calendar value in the verified broker zone **on that event date**, then convert that instant to UTC and Tehran. IANA historical rules provide winter/summer differences; today's offset is never reused for all historical records. Ambiguous fall-back times, nonexistent spring-forward times, and dates outside the evidence period remain explicitly unresolved, with no authoritative converted event time. Repeated decoration always derives from raw input, preventing double conversion. Test fixtures use `Europe/Helsinki` to exercise +2/+3 transitions; this is not a verified zone choice for GA1.
+
+`--report-date YYYY-MM-DD` selects a Tehran civil day for deals/revisions. Its boundaries are local midnight to the following local midnight, translated to UTC with `Asia/Tehran` rules for those dates. Historical skipped midnights use the first valid instant of the civil date. Verified event mapping is required to filter broker records into that day; unresolved fold records remain labelled with unverified day membership. UTC and raw fields remain present in JSON/CSV output. No financial performance metrics are calculated.
+
+`--query-plan YYYY-MM-DD` is an offline dry run: it translates the same Tehran daily boundaries into a **separately verified query basis**. When that basis is unverified it returns `query_status=unverified` and no executable query segments. For verified server-wall queries it splits ranges at broker-zone DST transitions and labels the UTC-aware argument carriers separately from physical UTC instants. Fall-back argument ranges may overlap; exact ticket deduplication and event-time checks remain necessary. Query plans do not execute MT5 calls or alter synchronization progress, and this change does not silently change the collector's existing numeric history-query policy.
+
+```powershell
+# Preview the Tehran day. Query arguments remain unavailable without evidence.
+.\.venv\Scripts\python.exe .\collector_inspect.py --query-plan 2026-07-02
+# After independently verifying an appropriate private mapping:
+.\.venv\Scripts\python.exe .\collector_inspect.py C:\private\collector.sqlite3 --history-table deals --report-date 2026-07-02 --time-mapping C:\private\time-mapping.local.json --format json --output C:\private\tehran-day.json
+.\.venv\Scripts\python.exe .\collector_inspect.py --query-plan 2026-07-02 --time-mapping C:\private\time-mapping.local.json
+```
+
+Fresh clock diagnostics on 30 October sampled changing quotes rather than assuming the last cached quote was current. Four paired gold-tick/SNTP observations had four different tick timestamps. Their literal epoch values were 7199.748–7199.956 seconds ahead of independent Cloudflare SNTP UTC, supporting today's approximately GMT+2 quote/server-clock relationship. At the same instants the PC was 44.676–44.683 seconds ahead of SNTP; independent HTTPS Date responses corroborated that skew. Windows reported unsynchronized Local CMOS Clock. An initial cached Market Watch clock reading was discarded; a refreshed advancing display agreed with the fresh quote-clock relationship. The original PC clock was not changed. This evidence does not establish historical Python deal semantics or a universal offset; broker event/query conversions remain unverified for GA1.
+
+Before approving a GA1 mapping, obtain broker/MetaQuotes confirmation for the exact returned deal fields and the date-range query basis, including historical DST transition rules and their applicability to this server/build. Compare exact deal tickets in the terminal's Deals view with an independently timestamped event record if available. Verify clock synchronization separately under operator control. Do not enable a guessed conversion simply because the current server display matches GMT+2/GMT+3.
+
+Timezone verification passed 74 tests in a 30-second-bounded full-suite run. Coverage includes winter/summer server examples, historical Tehran DST, midnight/date rollover, server DST folds/gaps, separate event/query bases, half-open Tehran day filters, unchanged raw payloads, prevention of double conversion, and offline JSON/CSV output. The original GA1 configuration/database and Windows clock were unchanged; no GA1 event/query policy has been declared verified.
+
+References: [Alpari server/platform-time policy](https://alpariworld.com/s3-static/2025-06/terms-of-business-alpari-jun-2025.pdf), [MetaQuotes deal properties](https://www.mql5.com/en/docs/constants/tradingconstants/dealproperties), [Python zoneinfo and Windows timezone-data guidance](https://docs.python.org/3/library/zoneinfo.html).

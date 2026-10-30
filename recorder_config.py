@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mt5_monitor import Config, DiagnosticError, load_config
+from history_config import HistoryConfig, load_history_config
+from report_time import zone, REPORT_ZONE
 
 
 @dataclass(frozen=True)
@@ -12,9 +14,11 @@ class RecorderConfig:
     fund_id: str
     source_id: str
     database_path: Path
+    history: HistoryConfig = HistoryConfig()
 
 
 def load_recorder_config(path: Path = Path('.env')) -> RecorderConfig:
+    zone(REPORT_ZONE)
     base = load_config(path)
     values = {}
     for line in path.read_text(encoding='utf-8-sig').splitlines():
@@ -33,4 +37,4 @@ def load_recorder_config(path: Path = Path('.env')) -> RecorderConfig:
         raise DiagnosticError('COLLECTOR_DB_PATH must be absolute')
     interval = base.refresh_interval if 'MT5_REFRESH_INTERVAL' in values else 5.0
     base = Config(base.terminal_path, base.expected_login, base.expected_server, interval)
-    return RecorderConfig(base, values['FUND_ID'], values['SOURCE_ID'], db)
+    return RecorderConfig(base, values['FUND_ID'], values['SOURCE_ID'], db, load_history_config(values))

@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from mt5_monitor import DiagnosticError
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class StorageError(DiagnosticError):
@@ -20,30 +20,33 @@ class Storage:
         self.connection = sqlite3.connect(path, timeout=5)
         try:
             self.connection.execute('PRAGMA busy_timeout=5000')
+            self.connection.execute('BEGIN IMMEDIATE')
             version = self.connection.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, 1, SCHEMA_VERSION):
+            if version not in (0, 1, 2, SCHEMA_VERSION):
                 raise StorageError(f'Unsupported database schema version {version}; expected {SCHEMA_VERSION}')
-            with self.connection:
-                if version == 0:
-                    if self.connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table'").fetchone()[0]:
-                        raise StorageError('Existing unversioned database is not a collector database')
-                    self.connection.execute('CREATE TABLE source (fund_id TEXT NOT NULL, source_id TEXT NOT NULL, login INTEGER NOT NULL, server TEXT NOT NULL, currency TEXT NOT NULL)')
-                    self.connection.execute('CREATE TABLE observations (observation_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT NOT NULL, balance REAL NOT NULL, equity REAL NOT NULL, profit REAL NOT NULL, credit REAL NOT NULL, margin REAL NOT NULL, margin_free REAL NOT NULL, margin_level REAL NOT NULL)')
-                    self.connection.execute('CREATE TABLE status_events (event_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT NOT NULL, status TEXT NOT NULL, detail TEXT)')
-                    self.connection.execute('INSERT INTO source VALUES (?,?,?,?,?)', identity)
-                    self.connection.execute('PRAGMA user_version=1')
+            if version == 0:
+                if self.connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table'").fetchone()[0]:
+                    raise StorageError('Existing unversioned database is not a collector database')
+                self.connection.execute('CREATE TABLE source (fund_id TEXT NOT NULL, source_id TEXT NOT NULL, login INTEGER NOT NULL, server TEXT NOT NULL, currency TEXT NOT NULL)')
+                self.connection.execute('CREATE TABLE observations (observation_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT NOT NULL, balance REAL NOT NULL, equity REAL NOT NULL, profit REAL NOT NULL, credit REAL NOT NULL, margin REAL NOT NULL, margin_free REAL NOT NULL, margin_level REAL NOT NULL)')
+                self.connection.execute('CREATE TABLE status_events (event_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT NOT NULL, status TEXT NOT NULL, detail TEXT)')
+                self.connection.execute('INSERT INTO source VALUES (?,?,?,?,?)', identity)
             rows = self.connection.execute('SELECT fund_id, source_id, login, server, currency FROM source').fetchall()
             if rows != [identity]:
                 raise StorageError('Database source/account/server/currency identity does not match configuration')
             if version in (0, 1):
-                with self.connection:
-                    self.connection.execute('ALTER TABLE observations ADD COLUMN cycle_id TEXT')
-                    self.connection.execute('CREATE TABLE cycles (cycle_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT NOT NULL)')
-                    self.connection.execute('CREATE TABLE active_batches (batch_id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL REFERENCES cycles(cycle_id), dataset TEXT NOT NULL CHECK(dataset IN (\'positions\',\'orders\')), fund_id TEXT NOT NULL, source_id TEXT NOT NULL, login INTEGER NOT NULL, server TEXT NOT NULL, currency TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT NOT NULL, outcome TEXT NOT NULL CHECK(outcome IN (\'success\',\'failed\',\'identity_mismatch\')), item_count INTEGER, detail TEXT, UNIQUE(cycle_id,dataset))')
-                    self.connection.execute('CREATE TABLE active_records (batch_id TEXT NOT NULL REFERENCES active_batches(batch_id), ticket TEXT NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(batch_id,ticket))')
-                    self.connection.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
+                self.connection.execute('ALTER TABLE observations ADD COLUMN cycle_id TEXT')
+                self.connection.execute('CREATE TABLE cycles (cycle_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT NOT NULL)')
+                self.connection.execute('CREATE TABLE active_batches (batch_id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL REFERENCES cycles(cycle_id), dataset TEXT NOT NULL CHECK(dataset IN (\'positions\',\'orders\')), fund_id TEXT NOT NULL, source_id TEXT NOT NULL, login INTEGER NOT NULL, server TEXT NOT NULL, currency TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT NOT NULL, outcome TEXT NOT NULL CHECK(outcome IN (\'success\',\'failed\',\'identity_mismatch\')), item_count INTEGER, detail TEXT, UNIQUE(cycle_id,dataset))')
+                self.connection.execute('CREATE TABLE active_records (batch_id TEXT NOT NULL REFERENCES active_batches(batch_id), ticket TEXT NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(batch_id,ticket))')
+            if version < 3:
+                from history_storage import create_schema
+                create_schema(self.connection)
+                self.connection.execute('PRAGMA user_version=3')
+            self.connection.commit()
             self.identity = identity
         except Exception:
+            self.connection.rollback()
             self.connection.close()
             raise
 
