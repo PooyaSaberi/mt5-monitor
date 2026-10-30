@@ -1,5 +1,16 @@
 # MT5 Monitor
 
+## M5.3: offline uploader visibility
+
+`uploader.py status --config C:\private\example.upload.local.json --format text`
+shows collection freshness separately from delivery backlog and historical receiver
+acknowledgement. `--format json` (the default) provides machine-readable v2 fields.
+Counts respect sequence gaps; pending bytes are exact while total unsent bytes stay
+unknown. Future timestamps are flagged with signed ages, and PC-clock accuracy
+remains unverified. Status never probes backend reachability, connects to MT5,
+creates uploader state or migrates a database. See [status fields and limitations](docs/uploader-status.md).
+Operational databases and processes were not accessed during this milestone.
+
 ## M5.2: independent durable uploading
 
 `uploader.py` supplies offline `check/status` and explicitly invoked `once/run`

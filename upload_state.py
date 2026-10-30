@@ -2,9 +2,10 @@
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
-from upload_contract import require, serialize_request, validate_acknowledgement, event_digest
+from upload_contract import require, serialize_request, validate_acknowledgement, event_digest, as_utc
 
 
 def encode(value):
@@ -77,7 +78,7 @@ class UploadState:
                 int(request['first_sequence']), int(request['last_sequence']), digest, payload))
         return self.pending()
 
-    def acknowledge(self, ack):
+    def acknowledge(self, ack, *, acknowledged_at=None):
         pending = self.pending()
         require(pending is not None, 'No pending batch')
         request = pending['request']
@@ -86,7 +87,8 @@ class UploadState:
         progress = self.progress
         progress.update(acknowledged_sequence=int(last['sequence']),
                         anchor={'sequence': int(last['sequence']), 'digest': event_digest(last)},
-                        last_ack=ack, attempts=0, next_retry=0., error=None, paused=False)
+                        last_ack=ack, last_acknowledged_at_utc=as_utc(acknowledged_at or datetime.now(timezone.utc).isoformat()),
+                        attempts=0, next_retry=0., error=None, paused=False)
         with self.db:
             self._progress(progress)
             self.db.execute('DELETE FROM pending WHERE singleton=1')
@@ -115,9 +117,15 @@ def inspect_state(path):
     db = sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True, timeout=.1)
     try:
         db.execute('BEGIN')
+        # State inspection is bounded too; reject oversized/corrupt state blobs.
+        import time
+        deadline = time.monotonic()+1.
+        db.set_progress_handler(lambda: int(time.monotonic()>deadline), 1000)
         require(db.execute('PRAGMA user_version').fetchone()[0] == 1, 'Unsupported uploader state')
-        binding, progress = db.execute('SELECT binding,progress FROM control WHERE singleton=1').fetchone()
+        binding, progress = db.execute('SELECT CASE WHEN length(binding)<=1048576 THEN binding END,CASE WHEN length(progress)<=1048576 THEN progress END FROM control WHERE singleton=1').fetchone()
+        require(binding is not None and progress is not None, 'State metadata exceeds limit')
         pending = db.execute('SELECT batch_id,first_sequence,last_sequence,digest,length(payload) FROM pending WHERE singleton=1').fetchone()
+        require(pending is None or pending[4] <= 512*1024, 'Pending request exceeds limit')
         payload = db.execute('SELECT payload FROM pending WHERE singleton=1').fetchone()
         request = json.loads(payload[0]) if payload else None
         if request:

@@ -1,5 +1,9 @@
 # M5.2: independent uploader and local receiver fixture
 
+M5.3 extends offline visibility with JSON v2 and `--format text`; see
+[uploader-status.md](uploader-status.md) for freshness, backlog/ack separation,
+signed ages, pre-v4/lock handling and compatibility fields.
+
 One uploader process per source reads a **schema v4** collector database and
 writes a separate uploader-state SQLite file. It never imports MT5, takes a
 terminal/collector lock, changes the collector database or runs HTTP in the
@@ -182,6 +186,7 @@ choose private destination/tokens/state paths; perform a bounded test-source run
 compare ingestion counts and restart/retry behavior, then review a source-by-source
 rollout. Keep history disabled and raw event-time mapping unverified.
 
-Status is on-demand/console only: centralized monitoring, oldest-backlog age/bytes,
-disk-space alarms and a reviewed retention policy remain future work. Do not delete
+Status is on-demand/console only. M5.3 adds oldest-backlog age and exact pending
+bytes; centralized monitoring, total backlog bytes, disk-space alarms and a
+reviewed retention policy remain future work. Do not delete
 collected history or unsent data during outages. No retention is implemented.

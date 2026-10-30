@@ -87,7 +87,7 @@ class UploaderTests(unittest.TestCase):
             if kwargs.get('limit')==20: raise sqlite3.OperationalError('interrupted')
             return original(*args,**kwargs)
         engine=self.engine(state,lambda c,p:called.append(p) or acknowledgement(p))
-        with patch('uploader.read_delivery',side_effect=budget):
+        with patch('upload_integrity.read_delivery',side_effect=budget):
             self.assertEqual(engine.step(),'retrying')
             self.assertEqual(engine.read_limit,10); self.assertEqual(called,[])
             self.assertEqual(state.progress['acknowledged_sequence'],0)

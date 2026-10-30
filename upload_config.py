@@ -59,7 +59,7 @@ class UploadConfig:
         return self
 
 
-def load_upload_config(path):
+def load_upload_config(path, *, validate=True):
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -72,4 +72,5 @@ def load_upload_config(path):
     require(data.keys() <= allowed, 'Unknown uploader configuration field')
     data['collector_db'] = Path(data['collector_db'])
     data['state_db'] = Path(data['state_db'])
-    return UploadConfig(**data).validate()
+    config = UploadConfig(**data)
+    return config.validate() if validate else config
