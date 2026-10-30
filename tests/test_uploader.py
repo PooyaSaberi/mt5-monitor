@@ -54,7 +54,7 @@ class UploaderTests(unittest.TestCase):
 
     def engine(self,state,send=None,cfg=None):
         return Uploader(cfg or self.cfg,state,send=send or (lambda c,p:acknowledgement(p)),
-                        clock=lambda:self.now,jitter=lambda:.5)
+                        clock=lambda:self.now,monotonic=lambda:self.now,jitter=lambda:.5)
 
     def server(self,receiver=None):
         receiver=receiver or Receiver(self.root/'receiver.sqlite3',{IDENTITY[1]:dict(token='test-token-A',fund_id=IDENTITY[0],currency='USD')})
@@ -117,6 +117,232 @@ class UploaderTests(unittest.TestCase):
         self.assertEqual(self.engine(reopened,succeed).step(),'acknowledged')
         self.assertEqual(sent,[pending['payload'],pending['payload']])
         self.assertEqual(reopened.progress['attempts'],0)
+
+    def test_monotonic_retry_ignores_wall_jumps_and_replays_bytes(self):
+        state=self.state(); wall=[1000.]; mono=[10.]; sent=[]
+        def fail(c,p): sent.append(p); raise DeliveryFailure('network_error',True, 5.)
+        engine=Uploader(self.cfg,state,send=fail,clock=lambda:wall[0],monotonic=lambda:mono[0],jitter=lambda:0)
+        self.assertEqual(engine.step(),'retrying'); pending=state.pending()['payload']
+        for t in (5000., 1., 6000.):
+            wall[0]=t; self.assertEqual(engine.step(),'backoff')
+        mono[0]+=5.
+        engine.send=lambda c,p: sent.append(p) or acknowledgement(p)
+        self.assertEqual(engine.step(),'acknowledged')
+        self.assertEqual(sent,[pending,pending]); self.assertEqual(state.progress['acknowledged_sequence'],2)
+
+    def test_uncertain_restart_and_boundaries(self):
+        from upload_state import retry_schedule
+        p=dict(next_retry=1300.,retry_schedule=dict(started=1000.,delay=300.,retry_after=300.))
+        self.assertEqual(retry_schedule(p,998.),(300.,False))
+        self.assertEqual(retry_schedule(p,997.99),(300.,True))
+        self.assertEqual(retry_schedule(p,1600.),(0.,False))
+        self.assertEqual(retry_schedule(p,1600.01),(300.,True))
+        self.assertEqual(retry_schedule(dict(next_retry=1.),0.),(300.,True))
+        short=dict(next_retry=1000.01,retry_schedule=dict(started=1000.,delay=.01,retry_after=0.))
+        self.assertEqual(retry_schedule(short,900.),(1.,True))
+        with self.assertRaises(ValueError):
+            retry_schedule(dict(next_retry=1.,retry_schedule={'started':0}),0.)
+
+    def test_uncertain_once_waits_and_normal_once_returns(self):
+        state=self.state(); wall=[1000.]; mono=[0.]; sent=[]
+        engine=Uploader(self.cfg,state,send=lambda c,p: (_ for _ in ()).throw(DeliveryFailure('network_error',True,5)),
+                        clock=lambda:wall[0],monotonic=lambda:mono[0],jitter=lambda:0)
+        self.assertEqual(engine.step(),'retrying'); payload=state.pending()['payload']; state.close()
+        class Stop:
+            def is_set(self): return False
+            def wait(self,delay): mono[0]+=delay; return False
+        def make(config, state, **kw):
+            return Uploader(config,state,clock=lambda:wall[0],monotonic=lambda:mono[0],**kw)
+        with patch('uploader.Uploader',side_effect=make):
+            self.assertEqual(execute(self.cfg,'once',stop=Stop(),output=lambda _:None,
+                                    send=lambda c,p:sent.append(p) or acknowledgement(p)),1)
+            self.assertEqual(mono[0],0.)
+            wall[0]=900.
+            self.assertEqual(execute(self.cfg,'once',stop=Stop(),output=lambda _:None,
+                                    send=lambda c,p:sent.append(p) or acknowledgement(p)),0)
+        self.assertEqual(mono[0],5.); self.assertEqual(sent,[payload])
+
+    def test_uncertain_once_interruption_preserves_pending(self):
+        state=self.state(); e=Uploader(self.cfg,state,send=lambda c,p: (_ for _ in ()).throw(DeliveryFailure('network_error',True)),clock=lambda:1000.,monotonic=lambda:0.)
+        self.assertEqual(e.step(),'retrying'); pending=state.pending()['payload']; state.close()
+        class Stop:
+            def is_set(self): return False
+            def wait(self,delay): return True
+        def make(config,state,**kw): return Uploader(config,state,clock=lambda:0.,monotonic=lambda:0.,**kw)
+        with patch('uploader.Uploader',side_effect=make):
+            self.assertEqual(execute(self.cfg,'once',stop=Stop(),output=lambda _:None,send=lambda c,p:self.fail('sent')),1)
+        state=self.state(); self.assertEqual(state.pending()['payload'],pending)
+        self.assertEqual(state.progress['acknowledged_sequence'],0)
+
+    def test_run_wait_uses_monotonic_despite_wall_step(self):
+        wall=[1000.]; mono=[0.]; sends=[]
+        class Stop:
+            stopped=False
+            def is_set(self): return self.stopped
+            def wait(self,delay):
+                mono[0]+=delay; wall[0]+=10000
+                if len(sends)>=2: self.stopped=True
+                return self.stopped
+        def send(c,p):
+            sends.append((mono[0],p))
+            if len(sends)==1: raise DeliveryFailure('network_error',True,5.)
+            return acknowledgement(p)
+        def make(config,state,**kw): return Uploader(config,state,clock=lambda:wall[0],monotonic=lambda:mono[0],**kw)
+        with patch('uploader.Uploader',side_effect=make):
+            self.assertEqual(execute(self.cfg,'run',stop=Stop(),output=lambda _:None,send=send),0)
+        self.assertGreaterEqual(sends[1][0]-sends[0][0],5.)
+        self.assertEqual(sends[0][1],sends[1][1])
+
+    def test_uncertain_status_is_read_only(self):
+        from datetime import datetime, timezone
+        state=self.state()
+        engine=Uploader(self.cfg,state,send=lambda c,p: (_ for _ in ()).throw(DeliveryFailure('network_error',True)),
+                        clock=lambda:1000.,monotonic=lambda:0.)
+        self.assertEqual(engine.step(),'retrying')
+        before=self.cfg.state_db.read_bytes()
+        view=status(self.cfg,now=datetime.fromtimestamp(900.,timezone.utc))
+        self.assertTrue(view['delivery']['retry_clock_uncertain'])
+        self.assertEqual(view['delivery']['retry_remaining_basis'],'wall_clock_estimate')
+        self.assertIsNone(view['delivery']['effective_monotonic_wait_seconds'])
+        self.assertEqual(before,self.cfg.state_db.read_bytes())
+
+    def test_repeated_interrupted_once_then_recovery(self):
+        state=self.state(); mono=[0.]; sent=[]
+        engine=Uploader(self.cfg,state,send=lambda c,p: (_ for _ in ()).throw(DeliveryFailure('network_error',True,5)),
+                        clock=lambda:1000.,monotonic=lambda:0.)
+        self.assertEqual(engine.step(),'retrying'); pending=state.pending()['payload']; binding=state.binding
+        state.close()
+        class Stop:
+            def __init__(self, interrupt): self.interrupt=interrupt
+            def is_set(self): return False
+            def wait(self,delay): mono[0]+=1 if self.interrupt else delay; return self.interrupt
+        def make(config,state,**kw): return Uploader(config,state,clock=lambda:900.,monotonic=lambda:mono[0],**kw)
+        with patch('uploader.Uploader',side_effect=make):
+            for _ in range(3):
+                self.assertEqual(execute(self.cfg,'once',stop=Stop(True),output=lambda _:None,
+                                         send=lambda c,p:sent.append(p) or acknowledgement(p)),1)
+                view=inspect_state(self.cfg.state_db)
+                self.assertEqual(view['progress']['acknowledged_sequence'],0)
+                self.assertFalse(view['progress']['paused']); self.assertEqual(view['binding'],binding)
+                self.assertEqual(view['pending_request']['batch_id'],json.loads(pending)['batch_id'])
+            self.assertEqual(sent,[])
+            self.assertEqual(execute(self.cfg,'once',stop=Stop(False),output=lambda _:None,
+                                     send=lambda c,p:sent.append(p) or acknowledgement(p)),0)
+        self.assertEqual(sent,[pending]); self.assertEqual(inspect_state(self.cfg.state_db)['progress']['acknowledged_sequence'],2)
+
+    def test_persisted_retry_metadata_corruption_and_legacy(self):
+        state=self.state(); engine=Uploader(self.cfg,state,send=lambda c,p: (_ for _ in ()).throw(DeliveryFailure('network_error',True,5)),clock=lambda:1000.,monotonic=lambda:0.)
+        self.assertEqual(engine.step(),'retrying'); original=state.progress; binding=state.binding; pending=state.pending()['payload']
+        cases=[{'started':1000.,'delay':5.}, {'started':'bad','delay':5.,'retry_after':0.},
+               {'started':1000.,'delay':-1.,'retry_after':0.}, {'started':1000.,'delay':4.,'retry_after':0.},
+               {'started':1000.,'delay':5.,'retry_after':'invalid'}, {'started':1000.,'delay':5.,'retry_after':0.,'extra':1}, None]
+        for metadata in cases:
+            with self.subTest(metadata=metadata):
+                bad=dict(original,retry_schedule=metadata)
+                with state.db: state._progress(bad)
+                with self.assertRaises(ValueError): Uploader(self.cfg,state,send=lambda c,p:None,clock=lambda:900.)
+                with self.assertRaises(ValueError): state.resume()
+                self.assertEqual(state.progress,bad)
+                self.assertEqual(state.pending()['payload'],pending); self.assertEqual(state.binding,binding)
+                self.assertEqual(state.progress['acknowledged_sequence'],0)
+        legacy=dict(original); legacy.pop('retry_schedule')
+        with state.db: state._progress(legacy)
+        resumed=Uploader(self.cfg,state,send=lambda c,p:None,clock=lambda:900.,monotonic=lambda:0.)
+        self.assertTrue(resumed.uncertain); self.assertEqual(resumed.remaining(),300.)
+        self.assertEqual(state.pending()['payload'],pending)
+
+    def test_contradictory_retry_progress_rejected_without_mutation(self):
+        state=self.state()
+        engine=Uploader(self.cfg,state,send=lambda c,p: (_ for _ in ()).throw(DeliveryFailure('network_error',True,5)),clock=lambda:1000.,monotonic=lambda:0.)
+        self.assertEqual(engine.step(),'retrying')
+        valid=state.progress; pending=state.pending()['payload']; binding=state.binding
+        cases=[dict(valid,attempts=0,error=None),
+               dict(valid,next_retry=0.,retry_schedule=None)]
+        cases[1].pop('retry_schedule')
+        for bad in cases:
+            with self.subTest(progress=bad):
+                with state.db: state._progress(bad)
+                before=state.progress
+                with self.assertRaises(ValueError): Uploader(self.cfg,state,send=lambda c,p:self.fail('unexpected send'),clock=lambda:1000.)
+                with self.assertRaises(ValueError): state.resume()
+                self.assertEqual(state.progress,before); self.assertEqual(state.pending()['payload'],pending)
+                self.assertEqual(state.binding,binding); self.assertEqual(state.progress['anchor'],valid['anchor'])
+                self.assertEqual(state.progress['acknowledged_sequence'],valid['acknowledged_sequence'])
+
+    def test_valid_prepared_and_collector_busy_retry_states(self):
+        state=self.state(); data=read_delivery(self.path)
+        events=data['events']
+        request=dict(contract_version=1,batch_id='prepared-test',source=data['source'],stream_id=data['stream_id'],
+                     first_sequence=events[0]['sequence'],last_sequence=events[-1]['sequence'],events=events)
+        prepared=state.prepare(request)
+        self.assertEqual(self.engine(state).step(),'acknowledged')
+        self.assertEqual(state.progress['acknowledged_sequence'],int(request['last_sequence']))
+        self.assertIsNone(state.pending())
+        with patch('upload_integrity.read_delivery',side_effect=sqlite3.OperationalError('busy')):
+            self.assertEqual(self.engine(state).step(),'retrying')
+        self.assertIsNone(state.pending()); progress=state.progress
+        self.assertEqual(progress['error'],'collector_busy_or_read_budget')
+        self.assertEqual(progress['attempts'],1)
+        reopened=self.state(); self.assertEqual(reopened.progress,progress)
+        self.assertEqual(self.engine(reopened).step(),'backoff')
+        self.assertEqual(prepared['request']['batch_id'],'prepared-test')
+
+    def test_scheduled_error_classification_preserves_state(self):
+        state=self.state()
+        engine=Uploader(self.cfg,state,send=lambda c,p: (_ for _ in ()).throw(DeliveryFailure('network_error',True,5)),clock=lambda:1000.,monotonic=lambda:0.)
+        self.assertEqual(engine.step(),'retrying')
+        original=state.progress; binding=state.binding; pending=state.pending(); calls=[]
+        fatal=('invalid_acknowledgement','http_401','http_403','http_409','http_501',
+               'redirect_rejected','tls_verification_failed','collector_or_anchor_inconsistent',
+               'collector_read_failed','event_invalid_or_oversized','request_too_large',
+               'response_too_large','unknown_error')
+        for code in fatal:
+            with self.subTest(code=code):
+                bad=dict(original,error=code)
+                with state.db: state._progress(bad)
+                with self.assertRaises(ValueError):
+                    Uploader(self.cfg,state,send=lambda c,p:calls.append(p),clock=lambda:2000.)
+                with self.assertRaises(ValueError): state.resume()
+                self.assertEqual(state.progress,bad); self.assertEqual(state.binding,binding)
+                self.assertEqual(state.pending(),pending)
+        self.assertEqual(calls,[])
+        for code in ('network_error','transport_timeout','collector_busy_or_read_budget',
+                     'http_429','http_500','http_502','http_503','http_504'):
+            with self.subTest(retryable=code):
+                good=dict(original,error=code)
+                with state.db: state._progress(good)
+                resumed=Uploader(self.cfg,state,send=lambda c,p:None,clock=lambda:900.,monotonic=lambda:0.)
+                self.assertTrue(resumed.uncertain); self.assertEqual(resumed.remaining(),5.)
+                legacy=dict(good); legacy.pop('retry_schedule')
+                with state.db: state._progress(legacy)
+                self.assertTrue(Uploader(self.cfg,state,send=lambda c,p:None,clock=lambda:900.).uncertain)
+        paused=dict(original,error='invalid_acknowledgement',paused=True,next_retry=0.)
+        paused.pop('retry_schedule')
+        with state.db: state._progress(paused)
+        self.assertEqual(Uploader(self.cfg,state,send=lambda c,p:None,clock=lambda:2000.).step(),'paused')
+        self.assertEqual(state.progress,paused); state.resume()
+        self.assertFalse(state.progress['paused']); self.assertEqual(state.pending(),pending)
+
+    def test_reboot_reconstruction_preserves_acknowledged_anchor(self):
+        for wall in (900.,5000.):
+            with self.subTest(wall=wall):
+                cfg=replace(self.cfg,state_db=self.root/('reboot-'+str(int(wall))+'.sqlite3'))
+                state=self.state(cfg); initial=[]
+                self.assertEqual(Uploader(cfg,state,send=lambda c,p:initial.append(p) or acknowledgement(p),clock=lambda:1000.,monotonic=lambda:50.).step(),'acknowledged')
+                anchor=state.progress['anchor']; binding=state.binding; cursor=state.progress['acknowledged_sequence']
+                self.store.save_observation(account()); sent=[]
+                def fail(c,p): sent.append(p); raise DeliveryFailure('network_error',True,5.)
+                self.assertEqual(Uploader(cfg,state,send=fail,clock=lambda:1000.,monotonic=lambda:50.).step(),'retrying')
+                pending=state.pending(); self.assertGreater(int(pending['request']['first_sequence']),cursor)
+                state.close(); state=self.state(cfg); mono=[0.]
+                engine=Uploader(cfg,state,send=lambda c,p:sent.append(p) or acknowledgement(p),clock=lambda:wall,monotonic=lambda:mono[0])
+                self.assertTrue(engine.uncertain); self.assertEqual(engine.remaining(),5.)
+                self.assertEqual(state.progress['anchor'],anchor); self.assertEqual(state.binding,binding)
+                self.assertEqual(state.progress['acknowledged_sequence'],cursor)
+                self.assertEqual(state.pending()['payload'],pending['payload']); self.assertEqual(state.pending()['digest'],pending['digest'])
+                self.assertEqual(engine.step(),'backoff'); mono[0]=5.; self.assertEqual(engine.step(),'acknowledged')
+                self.assertEqual(sent,[pending['payload'],pending['payload']]); self.assertGreater(state.progress['acknowledged_sequence'],cursor)
+                self.assertEqual(read_delivery(self.path,after_sequence=state.progress['acknowledged_sequence'])['pending_count'],0)
 
     def test_invalid_acknowledgements_pause_keep_pending(self):
         state=self.state()

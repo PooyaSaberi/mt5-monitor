@@ -1,6 +1,10 @@
 # M5.3: local uploader visibility
 
 Status is an offline observation of local files, not a probe of MT5 or the backend.
+The durable retry deadline and `retry_in_seconds` are wall-clock estimates;
+`retry_clock_uncertain` identifies an uncertain restart schedule and
+`effective_monotonic_wait_seconds` is null because offline status cannot observe
+another process's in-memory timer. `retry_remaining_basis` labels the estimate.
 It creates no uploader state/ownership locks, performs no migrations, and imports
 neither the HTTP transport/network stack nor MT5. No new dependency, UI, service,
 alert or retention behavior is introduced.

@@ -14,26 +14,37 @@ from upload_config import load_upload_config
 from upload_contract import require, serialize_request, validate_acknowledgement
 from upload_lock import UploadLock, source_lock_path
 from upload_reader import read_delivery
-from upload_state import UploadState, binding_for
+from upload_state import UploadState, binding_for, retry_schedule
 from upload_integrity import anchors_for, snapshot
 from upload_status import status, format_console
 
 
 class Uploader:
-    def __init__(self, config, state, *, send=None, clock=time.time, jitter=random.random):
+    def __init__(self, config, state, *, send=None, clock=time.time, monotonic=time.monotonic, jitter=random.random):
         if send is None:
             from upload_http import post
             send = post
         self.config, self.state, self.send = config, state, send
-        self.clock, self.jitter = clock, jitter
+        self.clock, self.monotonic, self.jitter = clock, monotonic, jitter
         self.read_limit = 20
+        progress = state.progress
+        self.uncertain = False
+        self.deadline = None
+        remaining, uncertain = retry_schedule(progress, self.clock())
+        if not progress['paused']:
+            self.uncertain = uncertain
+            if remaining:
+                self.deadline = self.monotonic() + remaining
+
+    def remaining(self):
+        return max(0., self.deadline - self.monotonic()) if self.deadline is not None else 0.
 
     def step(self):
         from upload_http import DeliveryFailure
         progress = self.state.progress
         if progress['paused']:
             return 'paused'
-        if self.clock() < progress['next_retry']:
+        if self.remaining() > 0:
             return 'backoff'
         pending = self.state.pending()  # corrupt state is fatal; never send it
         try:
@@ -80,13 +91,19 @@ class Uploader:
             self.state.failure(exc.code, paused=True)
             return 'paused'
         self.state.acknowledge(ack)  # failure is fatal, leaves pending transaction intact
+        self.deadline = None
+        self.uncertain = False
         return 'acknowledged'
 
     def _retry(self, code, retry_after=0.):
         attempts = self.state.progress['attempts']
         cap = min(self.config.retry_max, self.config.retry_base * 2**min(attempts, 16))
         delay = max(min(retry_after, 300.), cap * (.5 + .5*self.jitter()))
-        self.state.failure(code, due=self.clock()+delay)
+        started = self.clock()
+        self.state.failure(code, due=started+delay, schedule=dict(started=started, delay=delay,
+                           retry_after=min(retry_after, 300.)))
+        self.deadline = self.monotonic()+delay
+        self.uncertain = False
 
 
 def execute(config, command, *, stop=None, output=print, send=None, resume=False, output_format='json'):
@@ -114,12 +131,15 @@ def execute(config, command, *, stop=None, output=print, send=None, resume=False
                                    error=state.progress['error']), sort_keys=True))
             if outcome == 'paused':
                 return 2
+            if command == 'once' and outcome == 'backoff' and engine.uncertain:
+                if stop.wait(engine.remaining()):
+                    return 1
+                continue
             if command == 'once':
                 return 0 if outcome in ('acknowledged', 'idle') else 1
             # One request per iteration. No sleeps hold a database transaction.
-            due = state.progress['next_retry']
             if outcome in ('backoff', 'retrying'):
-                delay = max(.1, due-time.time())
+                delay = max(.1, engine.remaining())
             else:
                 delay = .1 if outcome == 'acknowledged' else config.poll_seconds
             stop.wait(min(delay, 300.))

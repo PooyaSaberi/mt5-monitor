@@ -8,7 +8,7 @@ import time
 
 from upload_contract import as_utc, utc, require, source, text, shape
 from upload_integrity import snapshot
-from upload_state import inspect_state, binding_for
+from upload_state import inspect_state, binding_for, retry_schedule
 
 ERROR_CODES = {
     'collector_read_failed', 'collector_busy_or_read_budget', 'collector_or_anchor_inconsistent',
@@ -159,6 +159,7 @@ def status(config, *, now=None, stale_after_seconds=30.):
             if view:
                 p = view['progress']
                 valid_progress(p)
+                retry_schedule(p, now.timestamp())
                 ack = ack_summary(view, config.expected_source)
         except sqlite3.Error as exc:
             state_error = 'state_'+sqlite_condition(exc)
@@ -220,6 +221,10 @@ def status(config, *, now=None, stale_after_seconds=30.):
         paused=p['paused'] if state_error is None else None,next_retry_at_utc=retry_at,
         retry_in_seconds=max(0.,retry-now.timestamp()) if retry else None,
         attempts=p.get('attempts') if state_error is None else None,last_error=error)
+    report['delivery']['retry_clock_uncertain'] = (retry_schedule(p, now.timestamp())[1]
+        if state_error is None and retry and not p['paused'] else None)
+    report['delivery']['retry_remaining_basis'] = 'wall_clock_estimate'
+    report['delivery']['effective_monotonic_wait_seconds'] = None
     report['receiver'] = dict(last_successful_acknowledgement=local_ack,
         local_ack_time_available=local_ack['at_utc'] is not None,
         receiver_receipt_at_utc=ack['received_at_utc'] if ack else None,

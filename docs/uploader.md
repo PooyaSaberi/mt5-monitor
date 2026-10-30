@@ -124,6 +124,15 @@ bodies or exception text. Invalid/malformed/partial acknowledgements pause.
 Transport failures/timeouts, HTTP 429 and 500/502/503/504 retry with durable
 exponential backoff (default 1..60 seconds with jitter). Numeric `Retry-After`
 seconds are honored up to 300 seconds; date-form headers are not interpreted.
+Active retry waits use a monotonic clock. On restart, wall time before the saved
+start by more than two seconds or after the deadline by more than 300 seconds,
+and legacy deadlines lacking metadata, are uncertain. Uncertain waits are 1..300
+seconds; legacy waits conservatively use 300 seconds. A known numeric Retry-After
+is included in the saved delay. `once` remains nonblocking for ordinary backoff,
+but waits interruptibly on an uncertain restart before one attempt. Repeated
+interruptions before the wait completes can postpone delivery indefinitely.
+Old uploader versions do not enforce the new schedule; do not downgrade without
+reviewing pending retry state. Wall time across reboot is only an estimate.
 401/403, validation failures, content conflicts, redirects and other HTTP outcomes
 pause visibly. Certificate verification failures pause. The pending request
 remains intact. `--resume` is explicit operator action, not automatic retry of

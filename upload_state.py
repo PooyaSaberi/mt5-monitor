@@ -1,11 +1,50 @@
 """Durable uploader progress/pending bytes in a separate SQLite database."""
 
 import json
+import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 from upload_contract import require, serialize_request, validate_acknowledgement, event_digest, as_utc
+
+RETRY_BEFORE_TOLERANCE = 2.0
+RETRY_AFTER_TOLERANCE = 300.0
+RETRYABLE_ERRORS = frozenset(('network_error', 'transport_timeout', 'collector_busy_or_read_budget',
+                              'http_429', 'http_500', 'http_502', 'http_503', 'http_504'))
+
+
+def retry_schedule(progress, now):
+    """Return (remaining, uncertain); wall time is only a restart estimate."""
+    due = progress['next_retry']
+    require(type(due) in (int, float) and math.isfinite(due) and due >= 0, 'Invalid retry deadline')
+    # The standalone timing helper also accepts deadline-only inputs. Persisted
+    # progress includes all three fields and must describe a real transition.
+    if any(key in progress for key in ('attempts', 'error', 'paused')):
+        require(all(key in progress for key in ('attempts', 'error', 'paused')), 'Incomplete retry progress')
+        attempts, error, paused = progress['attempts'], progress['error'], progress['paused']
+        require(type(attempts) is int and attempts >= 0 and type(paused) is bool, 'Invalid retry progress')
+        if paused:
+            require(attempts > 0 and isinstance(error, str) and bool(error) and due == 0 and
+                    'retry_schedule' not in progress, 'Inconsistent paused progress')
+        elif due:
+            require(attempts > 0 and isinstance(error, str) and error in RETRYABLE_ERRORS,
+                    'Inconsistent scheduled retry')
+        else:
+            require(attempts == 0 and error is None and 'retry_schedule' not in progress,
+                    'Inconsistent ready progress')
+    if 'retry_schedule' not in progress:
+        return (300.0, True) if due else (0.0, False)
+    meta = progress['retry_schedule']
+    require(isinstance(meta, dict) and set(meta) == {'started', 'delay', 'retry_after'}, 'Invalid retry schedule')
+    start, delay, retry_after = meta['started'], meta['delay'], meta['retry_after']
+    require(all(type(x) in (int, float) and math.isfinite(x) for x in (start, delay, retry_after)), 'Invalid retry schedule')
+    require(start >= 0 and 0 < delay <= 300 and 0 <= retry_after <= delay and
+            abs((start + delay) - due) < .0001, 'Inconsistent retry schedule')
+    uncertain = now < start - RETRY_BEFORE_TOLERANCE or now > due + RETRY_AFTER_TOLERANCE
+    if uncertain:
+        return min(300., max(1., delay, retry_after)), True
+    return max(0., min(delay, due - now)), False
 
 
 def encode(value):
@@ -89,19 +128,28 @@ class UploadState:
                         anchor={'sequence': int(last['sequence']), 'digest': event_digest(last)},
                         last_ack=ack, last_acknowledged_at_utc=as_utc(acknowledged_at or datetime.now(timezone.utc).isoformat()),
                         attempts=0, next_retry=0., error=None, paused=False)
+        progress.pop('retry_schedule', None)
         with self.db:
             self._progress(progress)
             self.db.execute('DELETE FROM pending WHERE singleton=1')
 
-    def failure(self, code, *, paused=False, due=0.):
+    def failure(self, code, *, paused=False, due=0., schedule=None):
         progress = self.progress
         progress.update(error=code, paused=paused, next_retry=due, attempts=progress['attempts']+1)
+        if schedule is None:
+            progress.pop('retry_schedule', None)
+        else:
+            progress['retry_schedule'] = schedule
+            retry_schedule(progress, schedule['started'])
         with self.db:
             self._progress(progress)
 
     def resume(self):
         progress = self.progress
+        require(all(key in progress for key in ('attempts', 'error', 'paused')), 'Incomplete retry progress')
+        retry_schedule(progress, 0.)  # Reject corrupt metadata before clearing a pause or retry.
         progress.update(paused=False, error=None, next_retry=0., attempts=0)
+        progress.pop('retry_schedule', None)
         with self.db:
             self._progress(progress)
 
