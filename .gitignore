@@ -220,6 +220,8 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Local MT5 Monitor data
+*.upload.local.json
+*.receiver.local.json
 *.env
 *.db
 *.db-*

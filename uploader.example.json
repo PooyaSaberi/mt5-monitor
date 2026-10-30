@@ -1,0 +1,17 @@
+{
+  "collector_db": "C:\\path\\to\\test-collector.sqlite3",
+  "state_db": "C:\\private\\mt5-uploader\\example-upload-state.sqlite3",
+  "endpoint": "https://ingestion.example.invalid/ingest/v1/batches",
+  "token": "REPLACE_WITH_SOURCE_SCOPED_TOKEN",
+  "expected_source": {
+    "fund_id": "example-fund",
+    "source_id": "example-source",
+    "currency": "USD"
+  },
+  "local_test": false,
+  "timeout": 10,
+  "attempt_timeout": 30,
+  "poll_seconds": 5,
+  "retry_base": 1,
+  "retry_max": 60
+}

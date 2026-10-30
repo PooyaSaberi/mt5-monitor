@@ -1,5 +1,18 @@
 # MT5 Monitor
 
+## M5.2: independent durable uploading
+
+`uploader.py` supplies offline `check/status` and explicitly invoked `once/run`
+commands. Pending bytes and acknowledgement progress live in separate locked
+SQLite state; the uploader never connects to MT5 or migrates collector databases.
+`upload_test_receiver.py` is an IPv4-loopback-only test fixture, not a production
+backend. See [configuration, commands, retries, recovery and limitations](docs/uploader.md)
+and the safe `uploader.example.json` / `receiver.example.json` templates.
+No new dependencies are required. Operational databases remain at their previous
+schema versions: uploader use requires an independently authorized, backed-up
+collector v4 upgrade. No operational uploader was started during implementation;
+history stays disabled and broker event-time mapping remains unverified.
+
 ## M5.1: durable local delivery preparation
 
 Schema v4 adds a transactional delivery stream for account observations and

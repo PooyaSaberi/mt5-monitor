@@ -1,0 +1,11 @@
+{
+  "database": "C:\\private\\mt5-uploader\\test-receiver.sqlite3",
+  "port": 8765,
+  "sources": {
+    "example-source": {
+      "fund_id": "example-fund",
+      "currency": "USD",
+      "token": "REPLACE_WITH_SOURCE_SCOPED_TEST_TOKEN"
+    }
+  }
+}

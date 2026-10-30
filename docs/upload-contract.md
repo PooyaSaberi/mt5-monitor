@@ -1,5 +1,8 @@
 # M5.1: local delivery stream and contract v1
 
+The M5.2 uploader/loopback fixture is documented in [uploader.md](uploader.md).
+The v1 wire contract and v4 collector schema remain unchanged.
+
 This milestone implements offline serialization/validation and a durable local
 delivery index only. There is no HTTP client, uploader process, receiver,
 acknowledgement storage or automatic delivery. History remains independently

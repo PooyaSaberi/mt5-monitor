@@ -190,6 +190,13 @@ def serialize_request(request):
     return data, hashlib.sha256(data).hexdigest()
 
 
+def event_digest(event):
+    """Fingerprint an immutable event, independent of request regrouping."""
+    validate_event(event)
+    return hashlib.sha256(json.dumps(event, sort_keys=True, ensure_ascii=True,
+                                    allow_nan=False, separators=(',', ':')).encode()).hexdigest()
+
+
 def validate_acknowledgement(ack, request):
     shape(ack, {'contract_version', 'batch_id', 'source_id', 'stream_id', 'accepted_through_sequence',
                 'request_sha256', 'result', 'received_at_utc'})
